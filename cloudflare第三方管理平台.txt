@@ -459,22 +459,7 @@ async function handleAPI(req, env) {
       }
 
       case 'check-features': {
-        return json({ success: true, hasPassword: !!(env && env.ACCESS_PASSWORD), hasKV: !!(env && env.CF_ACCOUNTS_KV) });
-      }
-
-      case 'save-accounts-kv': {
-        if (!env || !env.CF_ACCOUNTS_KV) return json({ success: false, error: 'CF_ACCOUNTS_KV 未绑定，请在 Worker 绑定设置中添加 KV 命名空间并变量名设为 CF_ACCOUNTS_KV' });
-        const { accounts } = payload;
-        if (!Array.isArray(accounts)) return json({ success: false, error: 'accounts 必须是数组' });
-        await env.CF_ACCOUNTS_KV.put('accounts', JSON.stringify(accounts));
-        return json({ success: true });
-      }
-
-      case 'load-accounts-kv': {
-        if (!env || !env.CF_ACCOUNTS_KV) return json({ success: false, error: 'CF_ACCOUNTS_KV 未绑定' });
-        const raw = await env.CF_ACCOUNTS_KV.get('accounts');
-        const accounts = raw ? JSON.parse(raw) : [];
-        return json({ success: true, accounts });
+        return json({ success: true, hasPassword: !!(env && env.ACCESS_PASSWORD) });
       }
 
       case 'load-batch-templates-kv': {
@@ -709,7 +694,7 @@ textarea.input{min-height:120px;resize:vertical;font-family:monospace}
     <hr style="margin:18px 0">
 
     <div style="font-weight:600">添加新账号</div>
-    <div class="note">如果不绑定KV空间，您的凭据将存储在本地浏览器中</div>
+    <div class="note">账号凭据仅存储在当前浏览器本地</div>
 
     <div style="margin-top:8px">
       <label class="small">Cloudflare 账号邮箱</label>
@@ -1463,10 +1448,9 @@ function renderStaticJS(env) {
     });
     document.getElementById('clearBtn').addEventListener('click', function(){ if(confirm('清除保存的账号？')){ localStorage.removeItem('cf_accounts'); renderSaved(); } });
 
-    // ===== 密码保护 + KV 账号同步 =====
+    // ===== 密码保护 =====
     function saveAccounts(arr) {
       localStorage.setItem('cf_accounts', JSON.stringify(arr));
-      fetch('/api', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'save-accounts-kv', accounts: arr }) }).catch(()=>{});
     }
 
     window.submitPw = async function() {
@@ -1494,19 +1478,7 @@ function renderStaticJS(env) {
           if (ov) { ov.style.display = 'flex'; setTimeout(() => document.getElementById('pwInput').focus(), 100); }
           return;
         }
-        const res = await r.json();
-        if (res.hasKV) {
-          try {
-            const kvR = await fetch('/api', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ action:'load-accounts-kv' }) });
-            const kvData = await kvR.json();
-            if (kvData.success && kvData.accounts && kvData.accounts.length) {
-              const local = loadSaved();
-              const merged = [...kvData.accounts];
-              local.forEach(a => { if (!merged.find(x => x.email === a.email)) merged.push(a); });
-              localStorage.setItem('cf_accounts', JSON.stringify(merged));
-            }
-          } catch(e) {}
-        }
+        await r.json();
       } catch(e) {}
       renderSaved();
     }
