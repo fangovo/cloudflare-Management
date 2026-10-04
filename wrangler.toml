@@ -1,0 +1,17 @@
+# Cloudflare 第三方管理面板 v2 — Module Worker 配置
+name = "cf-manager-v2"
+main = "_worker.js"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 访问密码（部署前必须设置，逐字填写，不要有多余空格）
+# 推荐用 wrangler secret 命令设置，而不是明文写在这里：
+#   wrangler secret put ACCESS_PASSWORD
+# [vars]
+# ACCESS_PASSWORD = "你的访问密码"
+
+# 批量部署模板 KV（可选）：用于「批量创建 Worker」页的内置模板
+# 先创建 KV：wrangler kv namespace create CF_ACCOUNTS_KV
+# [[kv_namespaces]]
+# binding = "CF_ACCOUNTS_KV"
+# id = "替换为你的 KV namespace id"
