@@ -17,6 +17,22 @@
 - **用量统计**：GraphQL 今日请求、按 Worker 排行
 - **设置**：workers.dev 子域名、鉴权方式查看、反馈入口
 
+## 功能截图
+
+![Workers 管理](screenshots/workers.png)
+
+![批量创建 Worker](screenshots/batch-create.png)
+
+![Workers KV 管理](screenshots/workers-kv.png)
+
+![D1 数据库管理](screenshots/d1.png)
+
+![域名管理](screenshots/domains.png)
+
+![Pages 管理](screenshots/pages.png)
+
+![Pages 部署记录](screenshots/pages-deployments.png)
+
 ## 部署教程
 
 ### 方式一：wrangler 命令行（推荐）
