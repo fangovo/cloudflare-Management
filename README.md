@@ -16,6 +16,8 @@
 - **Pages**：项目管理、部署记录、触发/重试/回滚/删除部署、自定义域名
 - **用量统计**：GraphQL 今日请求、按 Worker 排行
 - **设置**：workers.dev 子域名、鉴权方式查看、反馈入口
+- **OAuth 登录**：点"使用 Cloudflare 账号登录"，走官方 OAuth 2.0 + PKCE 授权，
+  不用创建/粘贴 API Token；token 快过期自动刷新；多账号切换互不干扰
 
 ## 功能截图
 
@@ -32,6 +34,8 @@
 ![Pages 管理](screenshots/pages.png)
 
 ![Pages 部署记录](screenshots/pages-deployments.png)
+
+![OAuth 账号切换](screenshots/oauth-accounts.png)
 
 ## 部署教程
 
@@ -123,8 +127,15 @@ wrangler kv namespace create CF_ACCOUNTS_KV
 
 ## 鉴权方式
 
-- **API Token（推荐）**：Bearer 鉴权，按最小权限配置
+- **OAuth 2.0 登录（推荐）**：登录页点橙色的"使用 Cloudflare 账号登录"，
+  跳转 Cloudflare 官方授权页点允许即可，不用创建 API Token、不用复制粘贴密钥
+- **API Token**：Bearer 鉴权，按最小权限配置
 - **Global API Key（旧版兼容）**：拥有账号全部权限，请妥善保管
+
+OAuth 说明：标准 Authorization Code + PKCE（S256）流程；access token 过期前 2 分钟
+自动用 refresh token 续期；OAuth 应用为公开应用，任何 Cloudflare 账号都能授权登录；
+账号列表显示 Cloudflare 账号邮箱（绿色 OAuth 徽标），多账号切换互不干扰；
+设置页"OAuth 登录配置"可更换 Client ID（Client ID 是公开标识，可放心填写）。
 
 凭据保存在浏览器 localStorage，每次请求发送给同源 Worker 后端，
 不直接发往前端的 `api.cloudflare.com`。
