@@ -20,13 +20,52 @@ function loadSaved(){ try { return JSON.parse(localStorage.getItem("cfm_accounts
 function saveAccounts(a){ localStorage.setItem("cfm_accounts", JSON.stringify(a)); }
 function getActiveIdx(){ var i = parseInt(localStorage.getItem("cfm_active_idx") || "-1", 10); return isNaN(i) ? -1 : i; }
 function getActiveAccount(){ var arr = loadSaved(); var i = getActiveIdx(); return (i >= 0 && arr[i]) ? arr[i] : null; }
+// ---- OAuth 2.0 + PKCE（Cloudflare 官方授权）----
+var OAUTH_DEFAULT_CLIENT_ID = "11ba6a4eb7ab0bc9e1cbdd9d46f59b02";
+var OAUTH_AUTH_URL = "https://dash.cloudflare.com/oauth2/auth";
+var OAUTH_SCOPES = "workers-scripts.read workers-scripts.write workers-routes.read workers-routes.write workers-tail.read workers-kv-storage.read workers-kv-storage.write d1.read d1.write workers-r2.read workers-r2.write zone.read zone.write dns.read dns.write page.read page.write analytics.read account-analytics.read account-settings.read memberships.read user-details.read";
+function getOAuthClientId(){ return localStorage.getItem("cfm_oauth_client_id") || OAUTH_DEFAULT_CLIENT_ID; }
+function setOAuthClientId(id){ if(id) localStorage.setItem("cfm_oauth_client_id", id); else localStorage.removeItem("cfm_oauth_client_id"); }
 function authPayload(){
   var a = getActiveAccount();
   if(!a) return {};
   if(a.mode === "token") return { authMode: "token", token: a.token };
+  if(a.mode === "oauth") return { authMode: "oauth", token: a.access_token };
   return { authMode: "key", email: a.email, key: a.key };
 }
+// OAuth token 快过期（2 分钟内）时自动刷新；刷新失败返回 false
+var _oauthRefreshing = null;
+async function ensureOAuthFresh(){
+  var a = getActiveAccount();
+  if(!a || a.mode !== "oauth") return true;
+  if(a.expires_at && Date.now() < a.expires_at - 120000) return true;
+  if(_oauthRefreshing) return _oauthRefreshing;
+  _oauthRefreshing = (async function(){
+    try {
+      var r = await fetch("/api", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "oauth-refresh", refresh_token: a.refresh_token, client_id: a.client_id || getOAuthClientId() }) });
+      var res = await r.json();
+      if(res && res.success && res.access_token){
+        a.access_token = res.access_token;
+        if(res.refresh_token) a.refresh_token = res.refresh_token;
+        a.expires_at = Date.now() + (res.expires_in || 3600) * 1000;
+        var arr = loadSaved(); var idx = getActiveIdx();
+        if(arr[idx] && arr[idx].mode === "oauth"){ arr[idx] = a; saveAccounts(arr); }
+        return true;
+      }
+    } catch(e){}
+    return false;
+  })();
+  var ok = await _oauthRefreshing;
+  _oauthRefreshing = null;
+  return ok;
+}
 async function api(action, body){
+  var a0 = getActiveAccount();
+  if(a0 && a0.mode === "oauth"){
+    var fresh = await ensureOAuthFresh();
+    if(!fresh) return { success: false, error: "OAuth 授权已过期，请重新使用 Cloudflare 账号登录", oauthExpired: true };
+  }
   var payload = authPayload();
   payload.action = action;
   if(body){ for(var k in body){ payload[k] = body[k]; } }
@@ -59,12 +98,49 @@ if(page === "login"){
     el("keyFields").style.display = (m === "key") ? "block" : "none";
     el("batchLoginHint").textContent = (m === "token") ? "Token 模式：每行一个，格式：备注|Token（备注可省略）" : "Key 模式：每行一个，格式：邮箱|GlobalApiKey";
   };
+  // ---- OAuth 2.0 + PKCE 登录 ----
+  function _b64url(buf){
+    var bin = String.fromCharCode.apply(null, new Uint8Array(buf));
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function _randB64(n){
+    var arr = new Uint8Array(n);
+    (window.crypto || window.msCrypto).getRandomValues(arr);
+    return _b64url(arr.buffer).slice(0, n);
+  }
+  async function _codeChallenge(verifier){
+    var d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+    return _b64url(d);
+  }
+  window.startOAuthLogin = async function(){
+    var clientId = getOAuthClientId();
+    if(!clientId){ alert("请先在设置页配置 OAuth Client ID"); return; }
+    try {
+      var verifier = _randB64(64);
+      var state = _randB64(32);
+      var challenge = await _codeChallenge(verifier);
+      sessionStorage.setItem("cfm_oauth_verifier", verifier);
+      sessionStorage.setItem("cfm_oauth_state", state);
+      var redirectUri = location.origin + "/oauth/callback";
+      var url = OAUTH_AUTH_URL
+        + "?client_id=" + encodeURIComponent(clientId)
+        + "&response_type=code"
+        + "&redirect_uri=" + encodeURIComponent(redirectUri)
+        + "&scope=" + encodeURIComponent(OAUTH_SCOPES)
+        + "&state=" + encodeURIComponent(state)
+        + "&code_challenge=" + encodeURIComponent(challenge)
+        + "&code_challenge_method=S256";
+      location.href = url;
+    } catch(e){ alert("启动 OAuth 失败：浏览器不支持 WebCrypto（需要 HTTPS）"); }
+  };
   function renderSaved(){
     var cont = el("savedAccounts"); var arr = loadSaved(); cont.innerHTML = "";
     if(!arr.length){ cont.textContent = "未找到已保存账号"; return; }
     arr.forEach(function(a, idx){
       var d = document.createElement("div"); d.className = "account-row";
-      var title = esc(a.mode === "token" ? (a.label || "API Token") : a.email) + ' <span class="pill ' + (a.mode === "token" ? "blue" : "amber") + '">' + (a.mode === "token" ? "Token" : "Key") + "</span>";
+      var pillCls = a.mode === "token" ? "blue" : (a.mode === "oauth" ? "green" : "amber");
+      var pillTxt = a.mode === "token" ? "Token" : (a.mode === "oauth" ? "OAuth" : "Key");
+      var title = esc(a.mode === "key" ? a.email : (a.label || "API Token")) + ' <span class="pill ' + pillCls + '">' + pillTxt + '</span>';
       d.innerHTML = "<div><div style=\"font-weight:600\">" + title + "</div><div class=\"small\">添加于 " + esc(a.added || "") + "</div></div>";
       var btn = document.createElement("button"); btn.className = "btn"; btn.textContent = "快速登录";
       btn.onclick = function(){ localStorage.setItem("cfm_active_idx", String(idx)); localStorage.removeItem("cfm_accountId"); location.href = "/app"; };
@@ -122,8 +198,7 @@ if(page === "login"){
       setTimeout(function(){ if(b.dataset.armed){ delete b.dataset.armed; b.textContent = "清除本地账号"; b.style.background = "#e5e7eb"; b.style.color = "#111"; } }, 5000);
     }
   });
-  window.submitPw = async function(){
-    var pw = el("pwInput").value; el("pwError").textContent = "";
+  window.submitPw = async function(){    var pw = el("pwInput").value; el("pwError").textContent = "";
     try {
       var r = await fetch("/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: pw }) });
       var res = await r.json();
@@ -139,6 +214,49 @@ if(page === "login"){
     renderSaved();
   }
   initLogin();
+  return;
+}
+if(page === "oauth-callback"){
+  // OAuth 授权回调：校验 state，用 code + PKCE verifier 换 token，保存账号后进 /app
+  (async function(){
+    var msgEl = el("cbMsg"), errEl = el("cbErr"), spinEl = el("cbSpin");
+    function fail(t){
+      if(spinEl) spinEl.style.display = "none";
+      if(msgEl) msgEl.textContent = "授权失败";
+      if(errEl) errEl.innerHTML = esc(t) + '<br><br><a href="/login" style="color:#2563eb">返回登录页</a>';
+    }
+    var q = new URLSearchParams(location.search);
+    if(q.get("error")){ fail("Cloudflare 返回错误：" + q.get("error")); return; }
+    var code = q.get("code"), state = q.get("state");
+    var verifier = sessionStorage.getItem("cfm_oauth_verifier");
+    var savedState = sessionStorage.getItem("cfm_oauth_state");
+    sessionStorage.removeItem("cfm_oauth_verifier");
+    sessionStorage.removeItem("cfm_oauth_state");
+    if(!code){ fail("未收到授权码"); return; }
+    if(!state || !savedState || state !== savedState){ fail("state 校验失败，已中止（防 CSRF）"); return; }
+    if(!verifier){ fail("PKCE 校验数据丢失，请重新发起登录"); return; }
+    if(msgEl) msgEl.textContent = "正在换取访问令牌…";
+    var clientId = getOAuthClientId();
+    var redirectUri = location.origin + "/oauth/callback";
+    var r;
+    try {
+      r = await fetch("/api", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "oauth-exchange", code: code, code_verifier: verifier, redirect_uri: redirectUri, client_id: clientId }) });
+    } catch(e){ fail("网络请求失败"); return; }
+    if(r.status === 401){ fail("面板会话已过期，请先完成面板访问密码验证，再重新发起 OAuth 登录"); return; }
+    var res; try { res = await r.json(); } catch(e){ res = {}; }
+    if(!res || !res.success){ fail(res.error || "换取令牌失败"); return; }
+    if(msgEl) msgEl.textContent = "正在验证账号…";
+    // 用新 token 验证并保存账号
+    var acc = { mode: "oauth", label: res.email || "OAuth 授权", access_token: res.access_token,
+      refresh_token: res.refresh_token || "", expires_at: Date.now() + (res.expires_in || 3600) * 1000,
+      client_id: clientId, added: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }).replace(/\//g, "-") };
+    var arr = loadSaved();
+    arr.unshift(acc); saveAccounts(arr);
+    localStorage.setItem("cfm_active_idx", "0");
+    localStorage.removeItem("cfm_accountId");
+    location.href = "/app";
+  })();
   return;
 }
 if(page === "app"){
@@ -159,15 +277,24 @@ function navTo(p){
   else if(p === "settings") loadSubdomainSettings();
 }
 window.navTo = navTo;
+window.saveOAuthClientId = function(){
+  var v = el("oauthClientIdInput").value.trim();
+  setOAuthClientId(v);
+  var ohint = el("oauthClientIdHint");
+  if(ohint) ohint.textContent = v ? "已使用自定义 Client ID" : "当前使用内置默认 Client ID";
+  showNotification("OAuth Client ID 已保存");
+};
 window.logout = function(){ localStorage.removeItem("cfm_active_idx"); localStorage.removeItem("cfm_accountId"); location.href = "/login"; };
 function openAccountSwitcher(){
   var arr = loadSaved(); var cur = getActiveAccount(); var cont = el("accountListContainer"); cont.innerHTML = "";
   if(!arr.length){ cont.innerHTML = "<div style=\"padding:16px;text-align:center;color:#64748b\">暂无其他账号</div>"; }
   arr.forEach(function(acc, idx){
-    var isActive = cur && ((acc.mode === "token" && cur.mode === "token" && acc.token === cur.token) || (acc.mode === "key" && cur.mode === "key" && acc.email === cur.email));
-    var title = esc(acc.mode === "token" ? (acc.label || "API Token") : acc.email);
+    var isActive = cur && acc.mode === cur.mode && ((acc.mode === "token" && acc.token === cur.token) || (acc.mode === "key" && acc.email === cur.email) || (acc.mode === "oauth" && acc.access_token === cur.access_token));
+    var title = esc(acc.mode === "key" ? acc.email : (acc.label || "API Token"));
+    var pillC = acc.mode === "token" ? "blue" : (acc.mode === "oauth" ? "green" : "amber");
+    var pillT = acc.mode === "token" ? "Token" : (acc.mode === "oauth" ? "OAuth" : "Key");
     var d = document.createElement("div"); d.className = "acct-row" + (isActive ? " acct-active" : "");
-    d.innerHTML = "<div style=\"flex:1;cursor:pointer\" data-idx=\"" + idx + "\"><div style=\"font-weight:600\">" + title + (isActive ? "<span class=\"badge\">当前</span>" : "") + " <span class=\"pill " + (acc.mode === "token" ? "blue" : "amber") + "\">" + (acc.mode === "token" ? "Token" : "Key") + "</span></div><div class=\"small\">" + esc(acc.added || "") + "</div></div>" + (isActive ? "" : "<button class=\"trash-btn\" data-idx=\"" + idx + "\">✕</button>");
+    d.innerHTML = "<div style=\"flex:1;cursor:pointer\" data-idx=\"" + idx + "\"><div style=\"font-weight:600\">" + title + (isActive ? "<span class=\"badge\">当前</span>" : "") + " <span class=\"pill " + pillC + "\">" + pillT + "</span></div><div class=\"small\">" + esc(acc.added || "") + "</div></div>" + (isActive ? "" : "<button class=\"trash-btn\" data-idx=\"" + idx + "\">✕</button>");
     cont.appendChild(d);
   });
   Array.from(cont.querySelectorAll("[data-idx]")).forEach(function(node){
@@ -495,6 +622,7 @@ var COMPAT_FLAGS_LIST = [
   "throw_on_not_implemented_tls_options", "no_throw_on_not_implemented_tls_options",
   "streams_enable_constructors", "transformstream_enable_standard_constructor",
   "durable_object_alarms", "durable_object_evictable",
+  "durable_object_io_tasks_prevent_eviction", "durable_object_io_tasks_do_not_prevent_eviction",
   "web_socket_compression", "fetch_refuses_unknown_protocols",
   "formdata_parser_supports_files", "html_rewriter_treats_esi_include_as_void_tag"
 ];
@@ -2253,6 +2381,11 @@ window.openPagesCompatFlagsModal = openPagesCompatFlagsModal; window.closePagesC
 window.confirmPagesCompatFlags = confirmPagesCompatFlags; window.togglePagesCompatFlag = togglePagesCompatFlag; window.addCustomPagesCompatFlag = addCustomPagesCompatFlag;
 var _cfSubdomain = "";
 async function loadSubdomainSettings(){
+  // OAuth Client ID 配置回显
+  var ocb = el("oauthCbUrl"); if(ocb) ocb.textContent = location.origin + "/oauth/callback";
+  var oinp = el("oauthClientIdInput"); if(oinp) oinp.value = getOAuthClientId();
+  var ohint = el("oauthClientIdHint");
+  if(ohint) ohint.textContent = localStorage.getItem("cfm_oauth_client_id") ? "已使用自定义 Client ID" : "当前使用内置默认 Client ID";
   var aid = await ensureAccountId();
   el("currentSubdomain").textContent = "加载中..."; _cfSubdomain = "";
   var r = await api("get-workers-subdomain", { accountId: aid });
@@ -2291,22 +2424,37 @@ window.saveSubdomain = saveSubdomain;
 window.debugOut = debugOut; window.closeOut = closeOut;
 async function initApp(){
   if(!getActiveAccount()){ location.href = "/login"; return; }
+  // 存量 OAuth 账号标签迁移：把通用的“OAuth 授权”换成真实邮箱（只对旧存档跑一次）
+  try {
+    var _ma = getActiveAccount();
+    if(_ma && _ma.mode === "oauth" && (!_ma.label || _ma.label === "OAuth 授权")){
+      var _ur = await api("oauth-userinfo", {});
+      if(_ur && _ur.success && _ur.email){
+        var _arr = loadSaved(); var _idx = getActiveIdx();
+        if(_arr[_idx] && _arr[_idx].mode === "oauth"){ _arr[_idx].label = _ur.email; saveAccounts(_arr); }
+      }
+    }
+  } catch(e){}
   var _acc0 = getActiveAccount();
   if(_acc0){
-    var _label0 = _acc0.mode === "token" ? (_acc0.label || "API Token") : _acc0.email;
-    el("acctInfo").innerHTML = "<span style=\"font-weight:600\">" + esc(_label0) + "</span> <span class=\"pill " + (_acc0.mode === "token" ? "blue" : "amber") + "\">" + (_acc0.mode === "token" ? "Token" : "Key") + "</span><br><span class=\"small\">验证中...</span>";
+    var _label0 = _acc0.mode === "key" ? _acc0.email : (_acc0.label || "API Token");
+    var _pill0 = _acc0.mode === "token" ? "blue" : (_acc0.mode === "oauth" ? "green" : "amber");
+    var _mt0 = _acc0.mode === "token" ? "Token" : (_acc0.mode === "oauth" ? "OAuth" : "Key");
+    el("acctInfo").innerHTML = "<span style=\"font-weight:600\">" + esc(_label0) + "</span> <span class=\"pill " + _pill0 + "\">" + _mt0 + "</span><br><span class=\"small\">验证中...</span>";
   }
   var r;
   try { r = await api("validate-credentials"); } catch(e){ r = null; }
   if(r && r.success && r.result && r.result.length){
     var a = getActiveAccount();
-    var label = a.mode === "token" ? (a.label || "API Token") : a.email;
-    el("acctInfo").innerHTML = "<span style=\"font-weight:600\">" + esc(label) + "</span> <span class=\"pill " + (a.mode === "token" ? "blue" : "amber") + "\">" + (a.mode === "token" ? "Token" : "Key") + "</span><br><span class=\"small\">" + r.result.length + " 个账号</span>";
+    var label = a.mode === "key" ? a.email : (a.label || "API Token");
+    var pillCls = a.mode === "token" ? "blue" : (a.mode === "oauth" ? "green" : "amber");
+    var modeTxt = a.mode === "token" ? "Token" : (a.mode === "oauth" ? "OAuth" : "Key");
+    el("acctInfo").innerHTML = "<span style=\"font-weight:600\">" + esc(label) + "</span> <span class=\"pill " + pillCls + "\">" + modeTxt + "</span><br><span class=\"small\">" + r.result.length + " 个账号</span>";
     localStorage.setItem("cfm_accountId", r.result[0].id);
     currentAccountId = r.result[0].id;
-    el("authModeBadge").textContent = (a.mode === "token" ? "Token" : "Key");
-    el("authModeBadge").className = "pill " + (a.mode === "token" ? "blue" : "amber");
-    el("authModeInfo").textContent = "当前使用 " + (a.mode === "token" ? "API Token（推荐）" : "Global API Key（旧版）") + " 鉴权 · " + label;
+    el("authModeBadge").textContent = modeTxt;
+    el("authModeBadge").className = "pill " + pillCls;
+    el("authModeInfo").textContent = "当前使用 " + (a.mode === "token" ? "API Token（推荐）" : (a.mode === "oauth" ? "OAuth 2.0 授权" : "Global API Key（旧版）")) + " 鉴权 · " + label;
   }
   refreshWorkers();
 }
