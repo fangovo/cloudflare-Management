@@ -1399,9 +1399,11 @@ function renderBatchPage(){
   var arr = loadSaved(); var list = el("batchAccountList"); list.innerHTML = "";
   if(!arr.length){ list.innerHTML = "<div style=\"padding:10px;color:#999\">请先在登录页添加账号</div>"; return; }
   arr.forEach(function(acc, idx){
-    var title = esc(acc.mode === "token" ? (acc.label || "API Token") : acc.email);
+    var title = esc(accountTitle(acc));
+    var pillCls = acc.mode === "token" ? "blue" : (acc.mode === "oauth" ? "green" : "amber");
+    var modeTxt = acc.mode === "token" ? "Token" : (acc.mode === "oauth" ? "OAuth" : "Key");
     var d = document.createElement("div"); d.className = "account-check-item";
-    d.innerHTML = "<label style=\"flex:1;cursor:pointer;display:flex;align-items:center\"><input type=\"checkbox\" class=\"batch-acc-chk\" value=\"" + idx + "\" style=\"margin-right:8px\"><span style=\"font-size:13px\">" + title + " <span class=\"pill " + (acc.mode === "token" ? "blue" : "amber") + "\">" + (acc.mode === "token" ? "Token" : "Key") + "</span></span></label>";
+    d.innerHTML = "<label style=\"flex:1;cursor:pointer;display:flex;align-items:center\"><input type=\"checkbox\" class=\"batch-acc-chk\" value=\"" + idx + "\" style=\"margin-right:8px\"><span style=\"font-size:13px\">" + title + " <span class=\"pill " + pillCls + "\">" + modeTxt + "</span></span></label>";
     list.appendChild(d);
   });
   clearBatchBindingLists();
@@ -1420,9 +1422,11 @@ function renderBatchPagesAccounts(){
   var arr = loadSaved(); var list = el("batchPagesAccountList"); if(!list) return; list.innerHTML = "";
   if(!arr.length){ list.innerHTML = "<div style=\"padding:10px;color:#999\">请先在登录页添加账号</div>"; return; }
   arr.forEach(function(acc, idx){
-    var title = esc(acc.mode === "token" ? (acc.label || "API Token") : acc.email);
+    var title = esc(accountTitle(acc));
+    var pillCls = acc.mode === "token" ? "blue" : (acc.mode === "oauth" ? "green" : "amber");
+    var modeTxt = acc.mode === "token" ? "Token" : (acc.mode === "oauth" ? "OAuth" : "Key");
     var d = document.createElement("div"); d.className = "account-check-item";
-    d.innerHTML = "<label style=\"flex:1;cursor:pointer;display:flex;align-items:center\"><input type=\"checkbox\" class=\"batch-pages-acc-chk\" value=\"" + idx + "\" style=\"margin-right:8px\"><span style=\"font-size:13px\">" + title + " <span class=\"pill " + (acc.mode === "token" ? "blue" : "amber") + "\">" + (acc.mode === "token" ? "Token" : "Key") + "</span></span></label>";
+    d.innerHTML = "<label style=\"flex:1;cursor:pointer;display:flex;align-items:center\"><input type=\"checkbox\" class=\"batch-pages-acc-chk\" value=\"" + idx + "\" style=\"margin-right:8px\"><span style=\"font-size:13px\">" + title + " <span class=\"pill " + pillCls + "\">" + modeTxt + "</span></span></label>";
     list.appendChild(d);
   });
 }
@@ -1632,7 +1636,9 @@ window.addBatchD1Row = function(){
   qdRefreshD1Selects();
 };
 function batchAuthFor(acc){
-  return (acc.mode === "token") ? { authMode: "token", token: acc.token } : { authMode: "key", email: acc.email, key: acc.key };
+  if(acc.mode === "token") return { authMode: "token", token: acc.token };
+  if(acc.mode === "oauth") return { authMode: "oauth", token: acc.access_token };
+  return { authMode: "key", email: acc.email, key: acc.key };
 }
 async function batchApi(acc, action, body){
   var p = batchAuthFor(acc); p.action = action;
