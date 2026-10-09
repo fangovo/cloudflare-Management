@@ -20,6 +20,16 @@ function loadSaved(){ try { return JSON.parse(localStorage.getItem("cfm_accounts
 function saveAccounts(a){ localStorage.setItem("cfm_accounts", JSON.stringify(a)); }
 function getActiveIdx(){ var i = parseInt(localStorage.getItem("cfm_active_idx") || "-1", 10); return isNaN(i) ? -1 : i; }
 function getActiveAccount(){ var arr = loadSaved(); var i = getActiveIdx(); return (i >= 0 && arr[i]) ? arr[i] : null; }
+// 账号显示名：key 模式显示邮箱；token 的 label 若缺失或就是 token 本身（旧数据），不直接显示 token
+function accountTitle(a){
+  if(!a) return "";
+  if(a.mode === "key") return a.email || "";
+  var label = a.label || "";
+  if(a.mode === "token" && label === a.token) label = "";
+  if(a.mode === "oauth" && !label) label = "OAuth 授权";
+  return label || "API Token";
+}
+function nowStr2(){ return new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }).replace(/\//g, "-"); }
 // ---- OAuth 2.0 + PKCE（Cloudflare 官方授权）----
 var OAUTH_DEFAULT_CLIENT_ID = "11ba6a4eb7ab0bc9e1cbdd9d46f59b02";
 var OAUTH_AUTH_URL = "https://dash.cloudflare.com/oauth2/auth";
@@ -140,7 +150,7 @@ if(page === "login"){
       var d = document.createElement("div"); d.className = "account-row";
       var pillCls = a.mode === "token" ? "blue" : (a.mode === "oauth" ? "green" : "amber");
       var pillTxt = a.mode === "token" ? "Token" : (a.mode === "oauth" ? "OAuth" : "Key");
-      var title = esc(a.mode === "key" ? a.email : (a.label || "API Token")) + ' <span class="pill ' + pillCls + '">' + pillTxt + '</span>';
+      var title = esc(accountTitle(a)) + ' <span class="pill ' + pillCls + '">' + pillTxt + '</span>';
       d.innerHTML = "<div><div style=\"font-weight:600\">" + title + "</div><div class=\"small\">添加于 " + esc(a.added || "") + "</div></div>";
       var btn = document.createElement("button"); btn.className = "btn"; btn.textContent = "快速登录";
       btn.onclick = function(){ localStorage.setItem("cfm_active_idx", String(idx)); localStorage.removeItem("cfm_accountId"); location.href = "/app"; };
@@ -155,7 +165,8 @@ if(page === "login"){
     var res; try { res = await r.json(); } catch(e){ res = {}; }
     if(res && res.success){
       var arr = loadSaved();
-      var acc = (authMode === "token") ? { mode: "token", label: label || "API Token", token: token, added: nowStr() } : { mode: "key", email: email, key: key, added: nowStr() };
+      var autoLabel = (authMode === "token" && res.result && res.result.length && res.result[0].name) ? res.result[0].name : "";
+      var acc = (authMode === "token") ? { mode: "token", label: label || autoLabel || "API Token", token: token, added: nowStr() } : { mode: "key", email: email, key: key, added: nowStr() };
       var key2 = (authMode === "token") ? ("t:" + token.slice(-8)) : ("k:" + email);
       var ex = arr.findIndex(function(x){ return (x.mode === "token" ? "t:" + String(x.token).slice(-8) : "k:" + x.email) === key2; });
       if(ex !== -1) arr.splice(ex, 1);
@@ -290,7 +301,7 @@ function openAccountSwitcher(){
   if(!arr.length){ cont.innerHTML = "<div style=\"padding:16px;text-align:center;color:#64748b\">暂无其他账号</div>"; }
   arr.forEach(function(acc, idx){
     var isActive = cur && acc.mode === cur.mode && ((acc.mode === "token" && acc.token === cur.token) || (acc.mode === "key" && acc.email === cur.email) || (acc.mode === "oauth" && acc.access_token === cur.access_token));
-    var title = esc(acc.mode === "key" ? acc.email : (acc.label || "API Token"));
+    var title = esc(accountTitle(acc));
     var pillC = acc.mode === "token" ? "blue" : (acc.mode === "oauth" ? "green" : "amber");
     var pillT = acc.mode === "token" ? "Token" : (acc.mode === "oauth" ? "OAuth" : "Key");
     var d = document.createElement("div"); d.className = "acct-row" + (isActive ? " acct-active" : "");
@@ -306,10 +317,82 @@ function openAccountSwitcher(){
       showNotification("正在切换账号..."); setTimeout(function(){ location.reload(); }, 500);
     });
   });
+  ensureAddAccountSection();
   el("accountModal").style.display = "flex";
 }
 window.openAccountSwitcher = openAccountSwitcher;
 window.closeAccountSwitcher = function(){ el("accountModal").style.display = "none"; };
+// ---- 切换账号弹窗内的添加账号 ----
+function ensureAddAccountSection(){
+  if(el("addAccountSection")) return;
+  var box = el("accountModal").querySelector(".modal-box");
+  var sec = document.createElement("div");
+  sec.id = "addAccountSection";
+  sec.style.cssText = "margin-top:12px;border-top:1px solid #eef2f6;padding-top:12px";
+  sec.innerHTML = '<button class="btn primary" style="width:100%" onclick="toggleAddAccountForm()">+ 添加账号</button>'
+    + '<div id="addAccountForm" style="display:none;margin-top:12px">'
+    + '<div class="tabs" style="margin-bottom:10px">'
+    + '<div class="tab active" data-aatab="token" onclick="switchAddAccountTab(\'token\')">API Token</div>'
+    + '<div class="tab" data-aatab="key" onclick="switchAddAccountTab(\'key\')">Global Key</div>'
+    + '</div>'
+    + '<div id="aaTokenPane"><div class="label">API Token</div><input id="aaToken" class="input" placeholder="粘贴 API Token">'
+    + '<div class="label" style="margin-top:8px">备注名（可选）</div><input id="aaLabel" class="input" placeholder="留空则自动使用 Cloudflare 账号名"></div>'
+    + '<div id="aaKeyPane" style="display:none"><div class="label">邮箱</div><input id="aaEmail" class="input" placeholder="Cloudflare 账号邮箱">'
+    + '<div class="label" style="margin-top:8px">Global API Key</div><input id="aaKey" class="input" placeholder="粘贴 Global API Key"></div>'
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" onclick="confirmAddAccount()">验证并保存</button>'
+    + '<button class="btn" onclick="toggleAddAccountForm()">取消</button>'
+    + '<button class="btn" onclick="startOAuthLogin()">OAuth 添加</button></div>'
+    + '</div>';
+  box.appendChild(sec);
+}
+function toggleAddAccountForm(){ var f = el("addAccountForm"); if(f) f.style.display = (f.style.display === "none" ? "" : "none"); }
+function switchAddAccountTab(t){
+  Array.from(document.querySelectorAll("[data-aatab]")).forEach(function(x){ x.classList.toggle("active", x.getAttribute("data-aatab") === t); });
+  el("aaTokenPane").style.display = t === "token" ? "" : "none";
+  el("aaKeyPane").style.display = t === "key" ? "" : "none";
+}
+async function confirmAddAccount(){
+  var tabEl = document.querySelector("[data-aatab].active");
+  var tab = tabEl ? tabEl.getAttribute("data-aatab") : "token";
+  var body, label = "", key2;
+  if(tab === "token"){
+    var token = el("aaToken").value.trim();
+    if(!token) return showNotification("请输入 API Token", "error");
+    label = el("aaLabel").value.trim();
+    body = { authMode: "token", token: token };
+    key2 = "t:" + token.slice(-8);
+  } else {
+    var email = el("aaEmail").value.trim(), key = el("aaKey").value.trim();
+    if(!email || !key) return showNotification("请输入邮箱和 Global API Key", "error");
+    body = { authMode: "key", email: email, key: key };
+    key2 = "k:" + email;
+  }
+  body.action = "validate-credentials";
+  showNotification("正在验证...", "warning");
+  var r;
+  try { r = await fetch("/api", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); }
+  catch(e){ showNotification("网络请求失败", "error"); return; }
+  var res; try { res = await r.json(); } catch(e){ res = {}; }
+  if(res && res.success){
+    var autoLabel = (tab === "token" && res.result && res.result.length && res.result[0].name) ? res.result[0].name : "";
+    var acc = (tab === "token")
+      ? { mode: "token", label: label || autoLabel || "API Token", token: body.token, added: nowStr2() }
+      : { mode: "key", email: body.email, key: body.key, added: nowStr2() };
+    var arr = loadSaved();
+    var ex = arr.findIndex(function(x){
+      var k = x.mode === "token" ? "t:" + String(x.token).slice(-8) : (x.mode === "key" ? "k:" + x.email : "o:" + x.access_token);
+      return k === key2;
+    });
+    if(ex !== -1) arr.splice(ex, 1);
+    arr.unshift(acc); saveAccounts(arr);
+    localStorage.setItem("cfm_active_idx", "0"); localStorage.removeItem("cfm_accountId");
+    showNotification("账号已添加");
+    setTimeout(function(){ location.reload(); }, 600);
+  } else {
+    showNotification("验证失败：" + ((res && res.error) || "unknown"), "error");
+  }
+}
+window.toggleAddAccountForm = toggleAddAccountForm; window.switchAddAccountTab = switchAddAccountTab; window.confirmAddAccount = confirmAddAccount;
 function tagRow(label, inner, left){
   return "<div class=\"tag-row" + (left ? " left" : "") + "\"><span class=\"tag-row-label\">" + label + "</span>" +
     (inner ? inner : "<span class=\"small\" style=\"color:#94a3b8\">无</span>") + "</div>";
@@ -474,6 +557,421 @@ async function deleteWorker(name){
   if(r && r.success){ showNotification("删除成功"); setTimeout(refreshWorkers, 600); } else showNotification((r && r.error) || "删除失败", "error");
 }
 window.openCreateWorker = openCreateWorker; window.closeCreate = closeCreate; window.confirmCreate = confirmCreate;
+// ---- 一键部署（新版新建 Worker）----
+function ensureQuickDeployModal(){
+  if(el("quickDeployModal")) return;
+  var h = '<div id="quickDeployModal" class="modal"><div class="modal-box">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">一键部署</h3>'
+    + '<span style="cursor:pointer;font-size:18px;color:#94a3b8" onclick="closeQuickDeploy()">&#10005;</span></div>'
+    + '<div class="small" style="margin:8px 0 14px">账号里已有同名 Worker 会自动转为更新，没有则新建</div>'
+    + '<div class="label">代码来源</div>'
+    + '<div style="display:flex;gap:18px;margin-bottom:10px;font-size:13px">'
+    + '<label style="cursor:pointer"><input type="radio" name="qdSrc" value="url" checked onchange="qdSwitchSrc()"> 直链</label>'
+    + '<label style="cursor:pointer"><input type="radio" name="qdSrc" value="editor" onchange="qdSwitchSrc()"> 编辑框</label>'
+    + '<label style="cursor:pointer"><input type="radio" name="qdSrc" value="file" onchange="qdSwitchSrc()"> 上传</label>'
+    + '</div>'
+    + '<div id="qdSrcUrl"><input id="qdUrl" class="input" placeholder=".js 直链"></div>'
+    + '<div id="qdSrcEditor" style="display:none"><textarea id="qdEditor" class="input" rows="12" style="min-height:240px;font-size:13px" placeholder="在此粘贴 Worker 脚本"></textarea></div>'
+    + '<div id="qdSrcFile" style="display:none"><input type="file" id="qdFile" accept=".js,.zip" class="input"></div>'
+    + '<div class="label" style="margin-top:14px">项目名</div>'
+    + '<input id="qdName" class="input" placeholder="例如: my-worker" oninput="qdAutoHostname()">'
+    + '<div class="small" style="margin-top:4px">将以此名称新建 Worker（账号里已有同名则转为更新）</div>'
+    + '<div class="label" style="margin-top:14px">环境变量 <span class="small">（可选）</span></div>'
+    + '<div id="qdEnvList"></div>'
+    + '<button class="btn small" style="margin-top:6px" onclick="qdAddEnvRow()">+ 添加变量</button>'
+    + '<div class="label" style="margin-top:14px">KV 绑定 <span class="small">（可选）</span></div>'
+    + '<div id="qdKvList"></div>'
+    + '<div style="margin-top:6px"><button class="btn small" onclick="qdAddKvRow()">+ 添加 KV</button></div>'
+    + '<div class="small" style="margin-top:4px">下拉选择已有命名空间；没有想要的就在右侧输入新名称，会自动创建</div>'
+    + '<div class="label" style="margin-top:14px">D1 数据库 <span class="small">（可选）</span></div>'
+    + '<div id="qdD1List"></div>'
+    + '<div style="margin-top:6px"><button class="btn small" onclick="qdAddD1Row()">+ 添加 D1</button></div>'
+    + '<div class="small" style="margin-top:4px">下拉选择已有数据库；没有想要的就在右侧输入新名称，会自动创建并绑定</div>'
+    + '<div class="label" style="margin-top:14px">项目域名 <span class="small">（可选）</span></div>'
+    + '<input id="qdHostname" class="input" placeholder="留空则自动生成：项目名.所选域名" oninput="this.dataset.manual=\'1\'">'
+    + '<div class="label" style="margin-top:14px">域名列表</div>'
+    + '<select id="qdZone" class="input" onchange="qdAutoHostname()"><option value="">不绑定域名</option></select>'
+    + '<div class="small" style="margin-top:4px">账号接入的 CF 域名，选定后自动生成上方未填写的域名</div>'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-top:14px"><span class="label" style="margin:0">分配域名</span>'
+    + '<label class="switch"><input type="checkbox" id="qdAssignDomain" checked><span class="slider"></span></label>'
+    + '<span class="small">开启后分配 workers.dev 域名；选择自定义域名时自动关闭</span></div>'
+    + '<div id="qdStatus" class="small" style="margin-top:12px;color:#1e40af"></div>'
+    + '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary" id="qdDeployBtn" onclick="confirmQuickDeploy()">开始部署</button><button class="btn" onclick="closeQuickDeploy()">取消</button></div>'
+    + '</div></div>';
+  document.body.insertAdjacentHTML("beforeend", h);
+  var m = el("quickDeployModal");
+  m.addEventListener("click", function(e){ if(e.target === m) closeQuickDeploy(); });
+}
+function openQuickDeploy(){
+  ensureQuickDeployModal();
+  el("qdName").value = ""; el("qdUrl").value = ""; el("qdEditor").value = "";
+  el("qdEnvList").innerHTML = ""; el("qdKvList").innerHTML = ""; el("qdD1List").innerHTML = "";
+  el("qdHostname").value = ""; el("qdHostname").dataset.manual = "";
+  el("qdAssignDomain").checked = true;
+  el("qdFile").value = ""; el("qdStatus").textContent = "";
+  document.querySelector('input[name="qdSrc"][value="url"]').checked = true; qdSwitchSrc();
+  qdLoadZones();
+  qdLoadKvOptions(true); qdLoadD1Options(true);
+  el("quickDeployModal").style.display = "flex";
+}
+// ---- 一键部署：环境变量 / KV / D1 行 ----
+function qdAddEnvRow(){
+  var d = document.createElement("div");
+  d.style.cssText = "display:flex;gap:8px;margin-top:6px";
+  d.innerHTML = '<input class="input qd-env-name" placeholder="变量名" style="flex:1"><input class="input qd-env-val" placeholder="变量值" style="flex:2"><button class="btn small" onclick="this.parentNode.remove()">✕</button>';
+  el("qdEnvList").appendChild(d);
+}
+// 一键部署 KV/D1 下拉（样式对齐"绑定资源"弹窗：名称 (ID)；右侧可输新名称自动创建）
+var qdKvCache = [], qdD1Cache = [];
+function qdToggleKvRow(sel){
+  var row = sel.parentNode;
+  var nw = row.querySelector(".qd-kv-new"), bn = row.querySelector(".qd-kv-bind");
+  var hasSel = !!sel.value;
+  nw.style.display = hasSel ? "none" : "";
+  bn.style.display = hasSel ? "" : "none";
+}
+function qdAddKvRow(){
+  var d = document.createElement("div");
+  d.style.cssText = "display:flex;gap:8px;margin-top:6px;align-items:center";
+  d.innerHTML = '<select class="input qd-kv-sel" style="flex:2;min-width:140px" onchange="qdToggleKvRow(this)"><option value="">— 下拉选择已有 —</option></select>'
+    + '<input class="input qd-kv-new" placeholder="或输入新名称，自动创建" style="flex:2;min-width:140px">'
+    + '<input class="input qd-kv-bind" placeholder="绑定名(留空自动)" style="flex:1;min-width:90px;display:none">'
+    + '<button class="btn small" onclick="this.parentNode.remove()">✕</button>';
+  el("qdKvList").appendChild(d);
+  qdRefreshKvSelects();
+}
+function qdToggleD1Row(sel){
+  var row = sel.parentNode;
+  var nw = row.querySelector(".qd-d1-new"), bn = row.querySelector(".qd-d1-bind");
+  var hasSel = !!sel.value;
+  nw.style.display = hasSel ? "none" : "";
+  bn.style.display = hasSel ? "" : "none";
+}
+function qdAddD1Row(){
+  var d = document.createElement("div");
+  d.style.cssText = "display:flex;gap:8px;margin-top:6px;align-items:center";
+  d.innerHTML = '<select class="input qd-d1-sel" style="flex:2;min-width:140px" onchange="qdToggleD1Row(this)"><option value="">— 下拉选择已有 —</option></select>'
+    + '<input class="input qd-d1-new" placeholder="或输入新名称，自动创建并绑定" style="flex:2;min-width:140px">'
+    + '<input class="input qd-d1-bind" placeholder="绑定名(留空自动)" style="flex:1;min-width:90px;display:none">'
+    + '<button class="btn small" onclick="this.parentNode.remove()">✕</button>';
+  el("qdD1List").appendChild(d);
+  qdRefreshD1Selects();
+}
+function qdRefreshKvSelects(){
+  Array.from(document.querySelectorAll(".qd-kv-sel")).forEach(function(sel){
+    var cur = sel.value;
+    sel.innerHTML = '<option value="">— 下拉选择已有 —</option>';
+    qdKvCache.forEach(function(ns){
+      var o = document.createElement("option");
+      o.value = ns.title;
+      o.textContent = (ns.title || ns.id) + " (" + ns.id + ")";
+      sel.appendChild(o);
+    });
+    sel.value = cur;
+  });
+}
+function qdRefreshD1Selects(){
+  Array.from(document.querySelectorAll(".qd-d1-sel")).forEach(function(sel){
+    var cur = sel.value;
+    sel.innerHTML = '<option value="">— 下拉选择已有 —</option>';
+    qdD1Cache.forEach(function(db){
+      var o = document.createElement("option");
+      o.value = db.name;
+      o.textContent = (db.name || db.uuid || db.id) + " (" + (db.uuid || db.id) + ")";
+      sel.appendChild(o);
+    });
+    sel.value = cur;
+  });
+}
+async function qdLoadKvOptions(silent){
+  try {
+    var r = await api("list-kv-namespaces", { accountId: currentAccountId });
+    qdKvCache = r.result || [];
+  } catch(e){ qdKvCache = []; }
+  qdRefreshKvSelects();
+  if(!silent) showNotification(qdKvCache.length ? ("已加载 " + qdKvCache.length + " 个 KV 命名空间") : "没有 KV 命名空间，可直接输入名称创建");
+}
+async function qdLoadD1Options(silent){
+  try {
+    var r = await api("list-d1", { accountId: currentAccountId });
+    qdD1Cache = r.result || [];
+  } catch(e){ qdD1Cache = []; }
+  qdRefreshD1Selects();
+  if(!silent) showNotification(qdD1Cache.length ? ("已加载 " + qdD1Cache.length + " 个 D1 数据库") : "没有 D1 数据库，可直接输入名称创建");
+}
+window.qdAddEnvRow = qdAddEnvRow; window.qdAddKvRow = qdAddKvRow; window.qdAddD1Row = qdAddD1Row;
+window.qdToggleKvRow = qdToggleKvRow; window.qdToggleD1Row = qdToggleD1Row;
+window.qdLoadKvOptions = qdLoadKvOptions; window.qdLoadD1Options = qdLoadD1Options;
+function closeQuickDeploy(){ var m = el("quickDeployModal"); if(m) m.style.display = "none"; }
+function qdSwitchSrc(){
+  var v = document.querySelector('input[name="qdSrc"]:checked').value;
+  el("qdSrcUrl").style.display = v === "url" ? "" : "none";
+  el("qdSrcEditor").style.display = v === "editor" ? "" : "none";
+  el("qdSrcFile").style.display = v === "file" ? "" : "none";
+}
+async function qdLoadZones(){
+  var sel = el("qdZone");
+  sel.innerHTML = '<option value="">不绑定域名</option>';
+  try {
+    var r = await api("list-zones", {});
+    (r.result || []).forEach(function(z){
+      var o = document.createElement("option"); o.value = z.name; o.textContent = z.name; sel.appendChild(o);
+    });
+  } catch(e){}
+}
+function qdAutoHostname(){
+  var hostEl = el("qdHostname");
+  var zone = el("qdZone").value;
+  var assignEl = el("qdAssignDomain");
+  if(assignEl) assignEl.checked = !zone;
+  if(hostEl.dataset.manual === "1") return;
+  var name = el("qdName").value.trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+  hostEl.value = (zone && name) ? (name + "." + zone) : "";
+}
+function qdFileToText(f){
+  return new Promise(function(res, rej){
+    var r = new FileReader(); r.onload = function(){ res(r.result); }; r.onerror = rej; r.readAsText(f);
+  });
+}
+function qdFileToBase64(f){
+  return new Promise(function(res, rej){
+    var r = new FileReader();
+    r.onload = function(){ var s = String(r.result); res(s.slice(s.indexOf(",") + 1)); };
+    r.onerror = rej; r.readAsDataURL(f);
+  });
+}
+async function confirmQuickDeploy(){
+  var name = el("qdName").value.trim();
+  if(!name) return showNotification("请输入项目名", "error");
+  var src = document.querySelector('input[name="qdSrc"]:checked').value;
+  var payload = { accountId: currentAccountId, scriptName: name };
+  if(src === "url"){
+    var url = el("qdUrl").value.trim();
+    if(!url) return showNotification("请输入直链", "error");
+    payload.sourceKind = "url"; payload.sourceUrl = url;
+  } else if(src === "editor"){
+    var text = el("qdEditor").value;
+    if(!text.trim()) return showNotification("请填写脚本内容", "error");
+    payload.sourceKind = "text"; payload.sourceText = text;
+  } else {
+    var f = el("qdFile").files[0];
+    if(!f) return showNotification("请选择文件", "error");
+    if(/\.zip$/i.test(f.name)){ payload.sourceKind = "b64zip"; payload.sourceB64 = await qdFileToBase64(f); }
+    else { payload.sourceKind = "text"; payload.sourceText = await qdFileToText(f); }
+  }
+  var envVars = [];
+  Array.from(document.querySelectorAll("#qdEnvList .qd-env-name")).forEach(function(inp, i){
+    var n = inp.value.trim();
+    if(n) envVars.push({ name: n, value: document.querySelectorAll("#qdEnvList .qd-env-val")[i].value });
+  });
+  if(envVars.length) payload.envVars = envVars;
+  var kvList = [];
+  Array.from(document.querySelectorAll("#qdKvList > div")).forEach(function(row){
+    var sel = row.querySelector(".qd-kv-sel"), nw = row.querySelector(".qd-kv-new"), bn = row.querySelector(".qd-kv-bind");
+    var ns = (nw.value.trim() || sel.value || "").trim();
+    if(ns) kvList.push({ nsName: ns, bindName: bn.value.trim() });
+  });
+  if(kvList.length) payload.kvList = kvList;
+  var d1List = [];
+  Array.from(document.querySelectorAll("#qdD1List > div")).forEach(function(row){
+    var sel = row.querySelector(".qd-d1-sel"), nw = row.querySelector(".qd-d1-new"), bn = row.querySelector(".qd-d1-bind");
+    var n = (nw.value.trim() || sel.value || "").trim();
+    if(n) d1List.push({ name: n, bindName: bn.value.trim() });
+  });
+  if(d1List.length) payload.d1List = d1List;
+  var host = el("qdHostname").value.trim();
+  if(host) payload.hostname = host;
+  payload.assignDomain = el("qdAssignDomain").checked;
+  var btn = el("qdDeployBtn");
+  btn.disabled = true; btn.textContent = "部署中...";
+  el("qdStatus").textContent = "正在部署，请稍候...";
+  try {
+    var r = await api("quick-deploy", payload);
+    if(r && r.success){
+      el("qdStatus").textContent = (r.notes || []).join("；");
+      showNotification("部署成功");
+      setTimeout(function(){ closeQuickDeploy(); refreshWorkers(); }, 1500);
+    } else {
+      el("qdStatus").textContent = "";
+      showNotification((r && r.error) || "部署失败", "error");
+    }
+  } catch(e){ showNotification("请求失败", "error"); }
+  btn.disabled = false; btn.textContent = "开始部署";
+}
+window.openQuickDeploy = openQuickDeploy; window.closeQuickDeploy = closeQuickDeploy;
+window.qdSwitchSrc = qdSwitchSrc; window.qdAutoHostname = qdAutoHostname; window.confirmQuickDeploy = confirmQuickDeploy;
+// ---- 一键部署：Pages 独立弹窗 ----
+function ensureQuickDeployPagesModal(){
+  if(el("quickDeployPagesModal")) return;
+  var h = '<div id="quickDeployPagesModal" class="modal"><div class="modal-box">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">一键部署</h3>'
+    + '<span style="cursor:pointer;font-size:18px;color:#94a3b8" onclick="closeQuickDeployPages()">&#10005;</span></div>'
+    + '<div class="small" style="margin:8px 0 14px">账号里已有同名 Pages 项目会自动转为更新（重新部署），没有则新建</div>'
+    + '<div class="label">代码来源</div>'
+    + '<div style="display:flex;gap:18px;margin-bottom:10px;font-size:13px">'
+    + '<label style="cursor:pointer"><input type="radio" name="qdPagesSrc" value="url" checked onchange="qdPagesSwitchSrc()"> 直链</label>'
+    + '<label style="cursor:pointer"><input type="radio" name="qdPagesSrc" value="file" onchange="qdPagesSwitchSrc()"> 上传</label>'
+    + '</div>'
+    + '<div id="qdPagesSrcUrl"><input id="qdPagesUrl" class="input" placeholder=".zip 直链"></div>'
+    + '<div id="qdPagesSrcFile" style="display:none"><input type="file" id="qdPagesFiles" multiple class="input"><div class="small" style="margin-top:4px">可多选文件；单个 .zip 包会自动解包</div></div>'
+    + '<div class="label" style="margin-top:14px">项目名</div>'
+    + '<input id="qdPagesName" class="input" placeholder="例如: my-site" oninput="qdPagesAutoHostname()">'
+    + '<div class="small" style="margin-top:4px">仅小写字母、数字、连字符；已有同名则转为更新</div>'
+    + '<div class="label" style="margin-top:14px">分支</div>'
+    + '<input id="qdPagesBranch" class="input" placeholder="main" style="max-width:200px">'
+    + '<div class="label" style="margin-top:14px">环境变量 <span class="small">（可选）</span></div>'
+    + '<div id="qdPagesEnvList"></div>'
+    + '<button class="btn small" style="margin-top:6px" onclick="qdPagesAddEnvRow()">+ 添加变量</button>'
+    + '<div class="label" style="margin-top:14px">KV 绑定 <span class="small">（可选）</span></div>'
+    + '<div id="qdPagesKvList"></div>'
+    + '<div style="margin-top:6px"><button class="btn small" onclick="qdPagesAddKvRow()">+ 添加 KV</button></div>'
+    + '<div class="small" style="margin-top:4px">下拉选择已有命名空间；没有想要的就在右侧输入新名称，会自动创建</div>'
+    + '<div class="label" style="margin-top:14px">D1 数据库 <span class="small">（可选）</span></div>'
+    + '<div id="qdPagesD1List"></div>'
+    + '<div style="margin-top:6px"><button class="btn small" onclick="qdPagesAddD1Row()">+ 添加 D1</button></div>'
+    + '<div class="small" style="margin-top:4px">下拉选择已有数据库；没有想要的就在右侧输入新名称，会自动创建并绑定</div>'
+    + '<div class="label" style="margin-top:14px">项目域名 <span class="small">（可选）</span></div>'
+    + '<input id="qdPagesHostname" class="input" placeholder="留空则自动生成：项目名.所选域名" oninput="this.dataset.manual=\'1\'">'
+    + '<div class="label" style="margin-top:14px">域名列表</div>'
+    + '<select id="qdPagesZone" class="input" onchange="qdPagesAutoHostname()"><option value="">不绑定域名</option></select>'
+    + '<div class="small" style="margin-top:4px">账号接入的 CF 域名，选定后自动生成上方未填写的域名</div>'
+    + '<div id="qdPagesStatus" class="small" style="margin-top:12px;color:#1e40af"></div>'
+    + '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn primary" id="qdPagesDeployBtn" onclick="confirmQuickDeployPages()">开始部署</button><button class="btn" onclick="closeQuickDeployPages()">取消</button></div>'
+    + '</div></div>';
+  document.body.insertAdjacentHTML("beforeend", h);
+}
+function openQuickDeployPages(){
+  ensureQuickDeployPagesModal();
+  el("qdPagesName").value = ""; el("qdPagesUrl").value = ""; el("qdPagesBranch").value = "";
+  el("qdPagesFiles").value = ""; el("qdPagesStatus").textContent = "";
+  el("qdPagesEnvList").innerHTML = ""; el("qdPagesKvList").innerHTML = ""; el("qdPagesD1List").innerHTML = "";
+  el("qdPagesHostname").value = ""; el("qdPagesHostname").dataset.manual = "";
+  document.querySelector('input[name="qdPagesSrc"][value="url"]').checked = true; qdPagesSwitchSrc();
+  el("quickDeployPagesModal").style.display = "flex";
+  qdLoadKvOptions(); qdLoadD1Options(); qdPagesLoadZones();
+}
+// ---- Pages 一键部署：环境变量/KV/D1/域名 ----
+function qdPagesAddEnvRow(){
+  var d = document.createElement("div");
+  d.style.cssText = "display:flex;gap:8px;margin-top:6px";
+  d.innerHTML = '<input class="input qd-env-name" placeholder="变量名" style="flex:1"><input class="input qd-env-val" placeholder="值" style="flex:2"><button class="btn small" onclick="this.parentNode.remove()">✕</button>';
+  el("qdPagesEnvList").appendChild(d);
+}
+function qdPagesAddKvRow(){
+  var d = document.createElement("div");
+  d.style.cssText = "display:flex;gap:8px;margin-top:6px;align-items:center";
+  d.innerHTML = '<select class="input qd-kv-sel" style="flex:2;min-width:140px" onchange="qdToggleKvRow(this)"><option value="">— 下拉选择已有 —</option></select>'
+    + '<input class="input qd-kv-new" placeholder="或输入新名称，自动创建" style="flex:2;min-width:140px">'
+    + '<input class="input qd-kv-bind" placeholder="绑定名(留空自动)" style="flex:1;min-width:90px;display:none">'
+    + '<button class="btn small" onclick="this.parentNode.remove()">✕</button>';
+  el("qdPagesKvList").appendChild(d);
+  qdRefreshKvSelects();
+}
+function qdPagesAddD1Row(){
+  var d = document.createElement("div");
+  d.style.cssText = "display:flex;gap:8px;margin-top:6px;align-items:center";
+  d.innerHTML = '<select class="input qd-d1-sel" style="flex:2;min-width:140px" onchange="qdToggleD1Row(this)"><option value="">— 下拉选择已有 —</option></select>'
+    + '<input class="input qd-d1-new" placeholder="或输入新名称，自动创建并绑定" style="flex:2;min-width:140px">'
+    + '<input class="input qd-d1-bind" placeholder="绑定名(留空自动)" style="flex:1;min-width:90px;display:none">'
+    + '<button class="btn small" onclick="this.parentNode.remove()">✕</button>';
+  el("qdPagesD1List").appendChild(d);
+  qdRefreshD1Selects();
+}
+async function qdPagesLoadZones(){
+  var sel = el("qdPagesZone");
+  sel.innerHTML = '<option value="">不绑定域名</option>';
+  try {
+    var r = await api("list-zones", {});
+    (r.result || []).forEach(function(z){
+      var o = document.createElement("option"); o.value = z.name; o.textContent = z.name; sel.appendChild(o);
+    });
+  } catch(e){}
+}
+function qdPagesAutoHostname(){
+  var hostEl = el("qdPagesHostname");
+  if(hostEl.dataset.manual === "1") return;
+  var zone = el("qdPagesZone").value;
+  var name = el("qdPagesName").value.trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+  hostEl.value = (zone && name) ? (name + "." + zone) : "";
+}
+window.qdPagesAddEnvRow = qdPagesAddEnvRow; window.qdPagesAddKvRow = qdPagesAddKvRow;
+window.qdPagesAddD1Row = qdPagesAddD1Row; window.qdPagesLoadZones = qdPagesLoadZones;
+window.qdPagesAutoHostname = qdPagesAutoHostname;
+function closeQuickDeployPages(){ el("quickDeployPagesModal").style.display = "none"; }
+function qdPagesSwitchSrc(){
+  var v = document.querySelector('input[name="qdPagesSrc"]:checked').value;
+  el("qdPagesSrcUrl").style.display = v === "url" ? "" : "none";
+  el("qdPagesSrcFile").style.display = v === "file" ? "" : "none";
+}
+function qdReadFilesAsBase64(files){
+  return Promise.all(Array.from(files).map(function(f){
+    return new Promise(function(res, rej){
+      var r = new FileReader();
+      r.onload = function(){ var s = String(r.result); res({ path: "/" + (f.webkitRelativePath || f.name), content: s.slice(s.indexOf(",") + 1) }); };
+      r.onerror = rej; r.readAsDataURL(f);
+    });
+  }));
+}
+async function confirmQuickDeployPages(){
+  var name = el("qdPagesName").value.trim().toLowerCase();
+  if(!name) return showNotification("请输入项目名", "error");
+  if(!/^[a-z0-9][a-z0-9-]*$/.test(name) || name.length > 63) return showNotification("项目名不合法：仅小写字母、数字、连字符", "error");
+  var src = document.querySelector('input[name="qdPagesSrc"]:checked').value;
+  var payload = { accountId: currentAccountId, projectName: name, branch: el("qdPagesBranch").value.trim() || "main" };
+  var envVars = [];
+  Array.from(document.querySelectorAll("#qdPagesEnvList > div")).forEach(function(row){
+    var n = row.querySelector(".qd-env-name").value.trim(), v = row.querySelector(".qd-env-val").value;
+    if(n) envVars.push({ name: n, value: v });
+  });
+  if(envVars.length) payload.envVars = envVars;
+  var kvList = [];
+  Array.from(document.querySelectorAll("#qdPagesKvList > div")).forEach(function(row){
+    var sel = row.querySelector(".qd-kv-sel"), nw = row.querySelector(".qd-kv-new"), bn = row.querySelector(".qd-kv-bind");
+    var n = (nw.value.trim() || sel.value || "").trim();
+    if(n) kvList.push({ name: n, bindName: bn.value.trim() });
+  });
+  if(kvList.length) payload.kvList = kvList;
+  var d1List = [];
+  Array.from(document.querySelectorAll("#qdPagesD1List > div")).forEach(function(row){
+    var sel = row.querySelector(".qd-d1-sel"), nw = row.querySelector(".qd-d1-new"), bn = row.querySelector(".qd-d1-bind");
+    var n = (nw.value.trim() || sel.value || "").trim();
+    if(n) d1List.push({ name: n, bindName: bn.value.trim() });
+  });
+  if(d1List.length) payload.d1List = d1List;
+  var host = el("qdPagesHostname").value.trim();
+  if(host) payload.hostname = host;
+  if(src === "url"){
+    var url = el("qdPagesUrl").value.trim();
+    if(!url) return showNotification("请输入直链", "error");
+    payload.sourceKind = "url"; payload.sourceUrl = url;
+  } else {
+    var fs = el("qdPagesFiles").files;
+    if(!fs || !fs.length) return showNotification("请选择文件", "error");
+    if(fs.length === 1 && /\.zip$/i.test(fs[0].name)){
+      payload.sourceKind = "b64zip"; payload.sourceB64 = await qdFileToBase64(fs[0]);
+    } else {
+      payload.sourceKind = "files"; payload.files = await qdReadFilesAsBase64(fs);
+    }
+  }
+  var btn = el("qdPagesDeployBtn");
+  btn.disabled = true; btn.textContent = "部署中...";
+  el("qdPagesStatus").textContent = "正在部署，请稍候...";
+  try {
+    var r = await api("quick-deploy-pages", payload);
+    if(r && r.success){
+      var msg = (r.notes && r.notes.length ? r.notes.join("；") : "Pages 部署成功") + (r.url ? ("；" + r.url) : "");
+      el("qdPagesStatus").textContent = msg + (r.warning ? ("；" + r.warning) : "");
+      showNotification("部署成功");
+      setTimeout(function(){ closeQuickDeployPages(); }, 1500);
+    } else {
+      el("qdPagesStatus").textContent = "";
+      showNotification((r && r.error) || "部署失败", "error");
+    }
+  } catch(e){ showNotification("请求失败", "error"); }
+  btn.disabled = false; btn.textContent = "开始部署";
+}
+window.openQuickDeployPages = openQuickDeployPages; window.closeQuickDeployPages = closeQuickDeployPages;
+window.qdPagesSwitchSrc = qdPagesSwitchSrc; window.confirmQuickDeployPages = confirmQuickDeployPages;
 window.editWorker = editWorker; window.deleteWorker = deleteWorker;
 // 面板部署历史（localStorage）：用于 Worker 版本回滚
 function getWorkerDeployHistory(name){
@@ -908,8 +1406,126 @@ function renderBatchPage(){
   });
   clearBatchBindingLists();
   loadBatchTemplateOptions().then(function(){ if(el("batchScriptSourceType").value === "builtin") applyBatchTemplatePreset(true); });
+  renderBatchPagesAccounts();
+  qdLoadKvOptions(true); qdLoadD1Options(true);
 }
 window.toggleSelectAllAccounts = function(cb){ document.querySelectorAll(".batch-acc-chk").forEach(function(c){ c.checked = cb.checked; }); };
+window.toggleSelectAllPagesAccounts = function(cb){ document.querySelectorAll(".batch-pages-acc-chk").forEach(function(c){ c.checked = cb.checked; }); };
+function switchBatchTab(t){
+  Array.from(document.querySelectorAll("[data-batchtab]")).forEach(function(x){ x.classList.toggle("active", x.getAttribute("data-batchtab") === t); });
+  el("batchWorkerPane").style.display = t === "worker" ? "" : "none";
+  el("batchPagesPane").style.display = t === "pages" ? "" : "none";
+}
+function renderBatchPagesAccounts(){
+  var arr = loadSaved(); var list = el("batchPagesAccountList"); if(!list) return; list.innerHTML = "";
+  if(!arr.length){ list.innerHTML = "<div style=\"padding:10px;color:#999\">请先在登录页添加账号</div>"; return; }
+  arr.forEach(function(acc, idx){
+    var title = esc(acc.mode === "token" ? (acc.label || "API Token") : acc.email);
+    var d = document.createElement("div"); d.className = "account-check-item";
+    d.innerHTML = "<label style=\"flex:1;cursor:pointer;display:flex;align-items:center\"><input type=\"checkbox\" class=\"batch-pages-acc-chk\" value=\"" + idx + "\" style=\"margin-right:8px\"><span style=\"font-size:13px\">" + title + " <span class=\"pill " + (acc.mode === "token" ? "blue" : "amber") + "\">" + (acc.mode === "token" ? "Token" : "Key") + "</span></span></label>";
+    list.appendChild(d);
+  });
+}
+function toggleBatchPagesSrc(){
+  var v = document.querySelector('input[name="batchPagesSrc"]:checked').value;
+  el("batchPagesUrlDiv").style.display = v === "url" ? "" : "none";
+  el("batchPagesFileDiv").style.display = v === "file" ? "" : "none";
+}
+function appendBatchPagesLog(msg, color){
+  var log = el("batchPagesLog"); if(!log) return;
+  var d = document.createElement("div");
+  d.style.color = color || "#fff"; d.textContent = "[" + new Date().toLocaleTimeString() + "] " + msg;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+}
+window.switchBatchTab = switchBatchTab; window.toggleBatchPagesSrc = toggleBatchPagesSrc;
+window.addBatchPagesEnvRow = function(k, v){
+  var div = document.createElement("div"); div.className = "env-row-batch";
+  div.innerHTML = "<input class=\"input b-penv-key\" placeholder=\"Key\" value=\"" + escA(k || "") + "\" style=\"flex:1\"><input class=\"input b-penv-val\" placeholder=\"Value\" value=\"" + escA(v || "") + "\" style=\"flex:1\"><button class=\"trash-btn\">✕</button>";
+  div.querySelector("button").addEventListener("click", function(){ div.remove(); });
+  el("batchPagesEnvList").appendChild(div);
+};
+window.addBatchPagesKvRow = function(){
+  var div = document.createElement("div"); div.className = "env-row-batch batch-pkv-row"; div.style.alignItems = "center";
+  div.innerHTML = "<select class=\"input qd-kv-sel\" style=\"flex:2;min-width:120px\" onchange=\"qdToggleKvRow(this)\"><option value=\"\">— 下拉选择已有 —</option></select>"
+    + "<input class=\"input qd-kv-new\" placeholder=\"或输入新名称，自动创建\" style=\"flex:2;min-width:120px\">"
+    + "<input class=\"input qd-kv-bind\" placeholder=\"绑定名(留空自动)\" style=\"flex:1;min-width:80px;display:none\">"
+    + "<button class=\"trash-btn\">✕</button>";
+  div.querySelector("button").addEventListener("click", function(){ div.remove(); });
+  el("batchPagesKvList").appendChild(div);
+  qdRefreshKvSelects();
+};
+window.addBatchPagesD1Row = function(){
+  var div = document.createElement("div"); div.className = "env-row-batch batch-pd1-row"; div.style.alignItems = "center";
+  div.innerHTML = "<select class=\"input qd-d1-sel\" style=\"flex:2;min-width:120px\" onchange=\"qdToggleD1Row(this)\"><option value=\"\">— 下拉选择已有 —</option></select>"
+    + "<input class=\"input qd-d1-new\" placeholder=\"或输入新名称，自动创建\" style=\"flex:2;min-width:120px\">"
+    + "<input class=\"input qd-d1-bind\" placeholder=\"绑定名(留空自动)\" style=\"flex:1;min-width:80px;display:none\">"
+    + "<button class=\"trash-btn\">✕</button>";
+  div.querySelector("button").addEventListener("click", function(){ div.remove(); });
+  el("batchPagesD1List").appendChild(div);
+  qdRefreshD1Selects();
+};
+window.startBatchPagesCreate = async function(){
+  var name = el("batchPagesName").value.trim().toLowerCase();
+  if(!name) return alert("请输入项目名");
+  if(!/^[a-z0-9][a-z0-9-]*$/.test(name) || name.length > 63) return alert("项目名不合法：仅小写字母、数字、连字符");
+  var chks = Array.from(document.querySelectorAll(".batch-pages-acc-chk:checked"));
+  if(!chks.length) return alert("请至少选择一个账号");
+  var src = document.querySelector('input[name="batchPagesSrc"]:checked').value;
+  var payload = { projectName: name, branch: el("batchPagesBranch").value.trim() || "main" };
+  if(src === "url"){
+    var url = el("batchPagesUrl").value.trim();
+    if(!url) return alert("请输入直链");
+    payload.sourceKind = "url"; payload.sourceUrl = url;
+  } else {
+    var fs = el("batchPagesFiles").files;
+    if(!fs || !fs.length) return alert("请选择文件");
+    appendBatchPagesLog("读取上传文件...", "#9ca3af");
+    if(fs.length === 1 && /\.zip$/i.test(fs[0].name)){
+      payload.sourceKind = "b64zip"; payload.sourceB64 = await qdFileToBase64(fs[0]);
+    } else {
+      payload.sourceKind = "files"; payload.files = await qdReadFilesAsBase64(fs);
+    }
+  }
+  var envVars = [];
+  el("batchPagesEnvList").querySelectorAll(".env-row-batch").forEach(function(row){
+    var k = row.querySelector(".b-penv-key").value.trim(), v = row.querySelector(".b-penv-val").value;
+    if(k) envVars.push({ name: k, value: v });
+  });
+  var kvRows = Array.from(el("batchPagesKvList").querySelectorAll(".batch-pkv-row")).map(function(r){
+    var sel = r.querySelector(".qd-kv-sel");
+    var nm = (r.querySelector(".qd-kv-new").value.trim() || (sel && sel.value) || "").trim();
+    if(!nm) return null;
+    return { bindName: r.querySelector(".qd-kv-bind").value.trim(), name: nm };
+  }).filter(function(x){ return x; });
+  var d1Rows = Array.from(el("batchPagesD1List").querySelectorAll(".batch-pd1-row")).map(function(r){
+    var sel = r.querySelector(".qd-d1-sel");
+    var nm = (r.querySelector(".qd-d1-new").value.trim() || (sel && sel.value) || "").trim();
+    if(!nm) return null;
+    return { bindName: r.querySelector(".qd-d1-bind").value.trim(), name: nm };
+  }).filter(function(x){ return x; });
+  if(envVars.length) payload.envVars = envVars;
+  if(kvRows.length) payload.kvList = kvRows;
+  if(d1Rows.length) payload.d1List = d1Rows;
+  var accounts = loadSaved();
+  el("batchPagesLog").innerHTML = "";
+  appendBatchPagesLog("开始批量部署 Pages，共 " + chks.length + " 个账号", "#fcd34d");
+  for(var ci = 0; ci < chks.length; ci++){
+    var acc = accounts[parseInt(chks[ci].value, 10)];
+    if(!acc) continue;
+    var label = acc.mode === "token" ? (acc.label || "Token") : acc.email;
+    appendBatchPagesLog("处理账号: " + label + " ...");
+    try {
+      var ar = await batchApi(acc, "list-accounts");
+      if(!ar.success || !ar.result || !ar.result.length){ appendBatchPagesLog("  获取 AccountID 失败", "#ef4444"); continue; }
+      var aid = ar.result[0].id;
+      var p = Object.assign({}, payload, { accountId: aid });
+      var r = await batchApi(acc, "quick-deploy-pages", p);
+      if(r && r.success) appendBatchPagesLog("  " + label + ": 部署成功" + (r.url ? " " + r.url : ""), "#4ade80");
+      else appendBatchPagesLog("  " + label + ": 失败 " + ((r && r.error) || ""), "#ef4444");
+    } catch(e){ appendBatchPagesLog("  " + label + ": 异常 " + e.message, "#ef4444"); }
+  }
+  appendBatchPagesLog("批量操作结束", "#fcd34d");
+};
 function clearBatchBindingLists(){ ["batchEnvList","batchKvList","batchD1List"].forEach(function(id){ if(el(id)) el(id).innerHTML = ""; }); }
 async function loadBatchTemplateOptions(force){
   if(batchTemplatesLoaded && !force) return batchTemplates;
@@ -995,17 +1611,25 @@ window.addBatchEnvRow = function(k, v){
   div.querySelector("button").addEventListener("click", function(){ div.remove(); });
   el("batchEnvList").appendChild(div);
 };
-window.addBatchKvRow = function(bind, name){
-  var div = document.createElement("div"); div.className = "env-row-batch batch-kv-row";
-  div.innerHTML = "<input class=\"input b-kv-bind\" placeholder=\"绑定变量名\" value=\"" + escA(bind || "") + "\" style=\"flex:1\"><input class=\"input b-kv-name\" placeholder=\"KV空间名(留空自动)\" value=\"" + escA(name || "") + "\" style=\"flex:1\"><button class=\"trash-btn\">✕</button>";
+window.addBatchKvRow = function(){
+  var div = document.createElement("div"); div.className = "env-row-batch batch-kv-row"; div.style.alignItems = "center";
+  div.innerHTML = "<select class=\"input qd-kv-sel\" style=\"flex:2;min-width:120px\" onchange=\"qdToggleKvRow(this)\"><option value=\"\">— 下拉选择已有 —</option></select>"
+    + "<input class=\"input qd-kv-new\" placeholder=\"或输入新名称，自动创建\" style=\"flex:2;min-width:120px\">"
+    + "<input class=\"input qd-kv-bind\" placeholder=\"绑定名(留空自动)\" style=\"flex:1;min-width:80px;display:none\">"
+    + "<button class=\"trash-btn\">✕</button>";
   div.querySelector("button").addEventListener("click", function(){ div.remove(); });
   el("batchKvList").appendChild(div);
+  qdRefreshKvSelects();
 };
-window.addBatchD1Row = function(bind, name){
-  var div = document.createElement("div"); div.className = "env-row-batch batch-d1-row";
-  div.innerHTML = "<input class=\"input b-d1-bind\" placeholder=\"绑定变量名\" value=\"" + escA(bind || "") + "\" style=\"flex:1\"><input class=\"input b-d1-name\" placeholder=\"数据库名(留空自动)\" value=\"" + escA(name || "") + "\" style=\"flex:1\"><button class=\"trash-btn\">✕</button>";
+window.addBatchD1Row = function(){
+  var div = document.createElement("div"); div.className = "env-row-batch batch-d1-row"; div.style.alignItems = "center";
+  div.innerHTML = "<select class=\"input qd-d1-sel\" style=\"flex:2;min-width:120px\" onchange=\"qdToggleD1Row(this)\"><option value=\"\">— 下拉选择已有 —</option></select>"
+    + "<input class=\"input qd-d1-new\" placeholder=\"或输入新名称，自动创建\" style=\"flex:2;min-width:120px\">"
+    + "<input class=\"input qd-d1-bind\" placeholder=\"绑定名(留空自动)\" style=\"flex:1;min-width:80px;display:none\">"
+    + "<button class=\"trash-btn\">✕</button>";
   div.querySelector("button").addEventListener("click", function(){ div.remove(); });
   el("batchD1List").appendChild(div);
+  qdRefreshD1Selects();
 };
 function batchAuthFor(acc){
   return (acc.mode === "token") ? { authMode: "token", token: acc.token } : { authMode: "key", email: acc.email, key: acc.key };
@@ -1032,15 +1656,26 @@ window.startBatchCreate = async function(){
     var k = row.querySelector(".b-env-key").value.trim(), v = row.querySelector(".b-env-val").value;
     if(k) bindings.push({ type: "plain_text", name: k, text: v });
   });
-  var wn = name || "worker";
   var kvRows = Array.from(el("batchKvList").querySelectorAll(".batch-kv-row")).map(function(r){
-    var b = r.querySelector(".b-kv-bind").value.trim();
-    return { bind: b, name: r.querySelector(".b-kv-name").value.trim() || (wn + "-" + b) };
-  }).filter(function(x){ return x.bind; });
+    var sel = r.querySelector(".qd-kv-sel");
+    var nm = (r.querySelector(".qd-kv-new").value.trim() || (sel && sel.value) || "").trim();
+    if(!nm) return null;
+    var bn = r.querySelector(".qd-kv-bind").value.trim();
+    var bind = bn || nm.toUpperCase().replace(/[^A-Z0-9_]/g, '_').replace(/^_+/, '');
+    if(/^\d/.test(bind)) bind = '_' + bind;
+    if(!bind) bind = 'KV';
+    return { bind: bind, name: nm };
+  }).filter(function(x){ return x; });
   var d1Rows = Array.from(el("batchD1List").querySelectorAll(".batch-d1-row")).map(function(r){
-    var b = r.querySelector(".b-d1-bind").value.trim();
-    return { bind: b, name: r.querySelector(".b-d1-name").value.trim() || (wn + "-" + b) };
-  }).filter(function(x){ return x.bind; });
+    var sel = r.querySelector(".qd-d1-sel");
+    var nm = (r.querySelector(".qd-d1-new").value.trim() || (sel && sel.value) || "").trim();
+    if(!nm) return null;
+    var bn = r.querySelector(".qd-d1-bind").value.trim();
+    var bind = bn || nm.toUpperCase().replace(/[^A-Z0-9_]/g, '_').replace(/^_+/, '');
+    if(/^\d/.test(bind)) bind = '_' + bind;
+    if(!bind) bind = 'DB';
+    return { bind: bind, name: nm };
+  }).filter(function(x){ return x; });
   var scriptContent = "";
   if(customScript){ scriptContent = customScript.replace(/\bwindow\b/g, "globalThis"); appendBatchLog("使用自定义脚本（" + scriptContent.length + " 字符）", "#60a5fa"); }
   else if(tpl){
@@ -1913,7 +2548,7 @@ async function deletePagesProject(btn){
   if(r && r.success){ showNotification("项目已删除"); refreshPagesProjects(); } else showNotification((r && r.error) || "删除失败", "error");
 }
 function backToPagesProjects(silent){ currentPagesProject = ""; el("pagesDeploySection").style.display = "none"; el("pagesProjectsList").style.display = "block"; if(!silent) refreshPagesProjects(); }
-function openCreatePagesProject(){ el("createPagesModal").style.display = "flex"; }
+function openCreatePagesProject(){ openQuickDeployPages(); }
 function closeCreatePagesModal(){ el("createPagesModal").style.display = "none"; }
 async function confirmCreatePagesProject(){
   var input = el("pagesProjectNameInput"); var n = input.value.trim().toLowerCase(); input.value = n;
@@ -2214,7 +2849,7 @@ async function openPagesBindModal(){
   Object.keys(ev).forEach(function(k){ var eo = ev[k] || {}; addPagesEnvRow(k, eo.value || "", (eo.type === "secret_text") ? "secret" : "text"); });
   var kv = prod.kv_namespaces || {};
   Object.keys(kv).forEach(function(k){ addPagesKvRow(k, kv[k] && kv[k].namespace_id); });
-  var d1o = prod.d1 || {}, d1map = d1o.d1_databases ? d1o.d1_databases : d1o;
+  var d1o = prod.d1_databases || prod.d1 || {}, d1map = d1o.d1_databases ? d1o.d1_databases : d1o;
   Object.keys(d1map).forEach(function(k){ var v = d1map[k]; addPagesD1Row(k, v && (v.id || v.database_id)); });
 }
 function closePagesBindModal(){ el("pagesBindModal").style.display = "none"; }
@@ -2437,7 +3072,7 @@ async function initApp(){
   } catch(e){}
   var _acc0 = getActiveAccount();
   if(_acc0){
-    var _label0 = _acc0.mode === "key" ? _acc0.email : (_acc0.label || "API Token");
+    var _label0 = accountTitle(_acc0);
     var _pill0 = _acc0.mode === "token" ? "blue" : (_acc0.mode === "oauth" ? "green" : "amber");
     var _mt0 = _acc0.mode === "token" ? "Token" : (_acc0.mode === "oauth" ? "OAuth" : "Key");
     el("acctInfo").innerHTML = "<span style=\"font-weight:600\">" + esc(_label0) + "</span> <span class=\"pill " + _pill0 + "\">" + _mt0 + "</span><br><span class=\"small\">验证中...</span>";
@@ -2446,7 +3081,13 @@ async function initApp(){
   try { r = await api("validate-credentials"); } catch(e){ r = null; }
   if(r && r.success && r.result && r.result.length){
     var a = getActiveAccount();
-    var label = a.mode === "key" ? a.email : (a.label || "API Token");
+    // 自动修复 token 账号显示名：label 缺失或就是 token 本身时，用 Cloudflare 账号名
+    if(a && a.mode === "token" && (!a.label || a.label === a.token) && r.result[0].name){
+      a.label = r.result[0].name;
+      var _arr = loadSaved(); var _idx = getActiveIdx();
+      if(_idx >= 0){ _arr[_idx] = a; saveAccounts(_arr); }
+    }
+    var label = accountTitle(a);
     var pillCls = a.mode === "token" ? "blue" : (a.mode === "oauth" ? "green" : "amber");
     var modeTxt = a.mode === "token" ? "Token" : (a.mode === "oauth" ? "OAuth" : "Key");
     el("acctInfo").innerHTML = "<span style=\"font-weight:600\">" + esc(label) + "</span> <span class=\"pill " + pillCls + "\">" + modeTxt + "</span><br><span class=\"small\">" + r.result.length + " 个账号</span>";
