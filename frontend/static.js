@@ -14,10 +14,49 @@ function showNotification(message, type){
   setTimeout(function(){ n.remove(); }, type === "warning" ? 6000 : 3200);
 }
 function copyToClipboard(text, event){ if(event) event.stopPropagation(); if(navigator.clipboard){ navigator.clipboard.writeText(text).then(function(){ showNotification("已复制到剪贴板"); }).catch(function(){ showNotification("复制失败","error"); }); } }
+// ---- 深色模式 ----
+function applyTheme(theme){
+  document.documentElement.setAttribute("data-theme", theme);
+  try { localStorage.setItem("cfm_theme", theme); } catch(e){}
+  var btn = el("themeToggleBtn");
+  if(btn) btn.textContent = theme === "dark" ? "☀️ 浅色模式" : "🌙 深色模式";
+  if(typeof drawTimeChart === "function"){
+    var cv = el("usageTimeChart");
+    if(cv && cv._chartRows) drawTimeChart(cv, cv._chartRows);
+  }
+}
+function toggleTheme(){
+  var cur = document.documentElement.getAttribute("data-theme") || "light";
+  applyTheme(cur === "dark" ? "light" : "dark");
+}
+window.toggleTheme = toggleTheme;
+(function initTheme(){
+  var t = "light";
+  try { t = localStorage.getItem("cfm_theme") || "light"; } catch(e){}
+  document.documentElement.setAttribute("data-theme", t);
+})();
 function debugOut(v){ el("debugOut").textContent = (typeof v === "string") ? v : JSON.stringify(v, null, 2); el("outModal").style.display = "flex"; }
 function closeOut(){ el("outModal").style.display = "none"; }
 function loadSaved(){ try { return JSON.parse(localStorage.getItem("cfm_accounts") || "[]"); } catch(e){ return []; } }
-function saveAccounts(a){ localStorage.setItem("cfm_accounts", JSON.stringify(a)); }
+// 账号去重键：oauth 按邮箱、token 按后8位、key 按邮箱
+function accountDedupeKey(a){
+  if(!a) return "";
+  if(a.mode === "oauth") return "o:" + String(a.label || "").toLowerCase();
+  if(a.mode === "token") return "t:" + String(a.token || "").slice(-8);
+  return "k:" + String(a.email || "").toLowerCase();
+}
+// 去重：相同账号只保留最新的一个（数组越靠前越新）
+function dedupeAccounts(arr){
+  var seen = {}, out = [];
+  for(var i = 0; i < arr.length; i++){
+    var k = accountDedupeKey(arr[i]);
+    if(!k || seen[k]) continue;
+    seen[k] = true;
+    out.push(arr[i]);
+  }
+  return out;
+}
+function saveAccounts(a){ try { localStorage.setItem("cfm_accounts", JSON.stringify(dedupeAccounts(a || []))); } catch(e){} }
 function getActiveIdx(){ var i = parseInt(localStorage.getItem("cfm_active_idx") || "-1", 10); return isNaN(i) ? -1 : i; }
 function getActiveAccount(){ var arr = loadSaved(); var i = getActiveIdx(); return (i >= 0 && arr[i]) ? arr[i] : null; }
 // 账号显示名：key 模式显示邮箱；token 的 label 若缺失或就是 token 本身（旧数据），不直接显示 token
@@ -85,6 +124,23 @@ async function api(action, body){
   var res;
   try { res = await r.json(); } catch(e){ res = { success: false, error: "响应解析失败" }; }
   if(r.status === 401 && res && res.error && res.error.indexOf("未授权") >= 0){ location.href = "/login"; }
+  // OAuth 的 access_token 被 Cloudflare 拒掉（比如被撤销）：强制刷新一次再重试，仍失败则判为过期
+  if(a0 && a0.mode === "oauth" && res && !res.success && !res.oauthExpired){
+    var emsg = String(res.error || "");
+    if(/invalid|expired|revoked|unauthorized|token/i.test(emsg)){
+      _oauthRefreshing = null;
+      var a1 = getActiveAccount();
+      if(a1){ a1.expires_at = 0; }
+      var fresh2 = await ensureOAuthFresh();
+      if(!fresh2) return { success: false, error: "OAuth 授权已过期，请重新使用 Cloudflare 账号登录", oauthExpired: true };
+      payload = authPayload(); payload.action = action;
+      if(body){ for(var k in body){ payload[k] = body[k]; } }
+      try { r = await fetch("/api", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); }
+      catch(e){ return { success: false, error: "网络请求失败，请检查网络后重试" }; }
+      try { res = await r.json(); } catch(e){ res = { success: false, error: "响应解析失败" }; }
+      if(!res.success) res.oauthExpired = true;
+    }
+  }
   return res;
 }
 async function ensureAccountId(){
@@ -98,6 +154,55 @@ async function ensureAccountId(){
   return null;
 }
 var page = document.body && document.body.dataset ? document.body.dataset.page : "";
+// 启动时清理一次已有的重复账号（只保留最新的）
+try {
+  var _ca = loadSaved(), _da = dedupeAccounts(_ca);
+  if(_da.length !== _ca.length){
+    // 保持当前选中账号指向去重后的位置
+    var _cur = getActiveAccount(), _ck = _cur ? accountDedupeKey(_cur) : "";
+    localStorage.setItem("cfm_accounts", JSON.stringify(_da));
+    if(_ck){
+      for(var _di = 0; _di < _da.length; _di++){
+        if(accountDedupeKey(_da[_di]) === _ck){ localStorage.setItem("cfm_active_idx", String(_di)); break; }
+      }
+    }
+  }
+} catch(e){}
+// ---- OAuth 2.0 + PKCE 登录（顶层：登录页和 app 页的切换账号弹窗都要用）----
+function _b64url(buf){
+  var bin = String.fromCharCode.apply(null, new Uint8Array(buf));
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function _randB64(n){
+  var arr = new Uint8Array(n);
+  (window.crypto || window.msCrypto).getRandomValues(arr);
+  return _b64url(arr.buffer).slice(0, n);
+}
+async function _codeChallenge(verifier){
+  var d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return _b64url(d);
+}
+window.startOAuthLogin = async function(){
+  var clientId = getOAuthClientId();
+  if(!clientId){ alert("请先在设置页配置 OAuth Client ID"); return; }
+  try {
+    var verifier = _randB64(64);
+    var state = _randB64(32);
+    var challenge = await _codeChallenge(verifier);
+    sessionStorage.setItem("cfm_oauth_verifier", verifier);
+    sessionStorage.setItem("cfm_oauth_state", state);
+    var redirectUri = location.origin + "/oauth/callback";
+    var url = OAUTH_AUTH_URL
+      + "?client_id=" + encodeURIComponent(clientId)
+      + "&response_type=code"
+      + "&redirect_uri=" + encodeURIComponent(redirectUri)
+      + "&scope=" + encodeURIComponent(OAUTH_SCOPES)
+      + "&state=" + encodeURIComponent(state)
+      + "&code_challenge=" + encodeURIComponent(challenge)
+      + "&code_challenge_method=S256";
+    location.href = url;
+  } catch(e){ alert("启动 OAuth 失败：浏览器不支持 WebCrypto（需要 HTTPS）"); }
+};
 if(page === "login"){
   var authMode = "token";
   window.switchAuthMode = function(m){
@@ -107,41 +212,6 @@ if(page === "login"){
     el("tokenFields").style.display = (m === "token") ? "block" : "none";
     el("keyFields").style.display = (m === "key") ? "block" : "none";
     el("batchLoginHint").textContent = (m === "token") ? "Token 模式：每行一个，格式：备注|Token（备注可省略）" : "Key 模式：每行一个，格式：邮箱|GlobalApiKey";
-  };
-  // ---- OAuth 2.0 + PKCE 登录 ----
-  function _b64url(buf){
-    var bin = String.fromCharCode.apply(null, new Uint8Array(buf));
-    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  }
-  function _randB64(n){
-    var arr = new Uint8Array(n);
-    (window.crypto || window.msCrypto).getRandomValues(arr);
-    return _b64url(arr.buffer).slice(0, n);
-  }
-  async function _codeChallenge(verifier){
-    var d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-    return _b64url(d);
-  }
-  window.startOAuthLogin = async function(){
-    var clientId = getOAuthClientId();
-    if(!clientId){ alert("请先在设置页配置 OAuth Client ID"); return; }
-    try {
-      var verifier = _randB64(64);
-      var state = _randB64(32);
-      var challenge = await _codeChallenge(verifier);
-      sessionStorage.setItem("cfm_oauth_verifier", verifier);
-      sessionStorage.setItem("cfm_oauth_state", state);
-      var redirectUri = location.origin + "/oauth/callback";
-      var url = OAUTH_AUTH_URL
-        + "?client_id=" + encodeURIComponent(clientId)
-        + "&response_type=code"
-        + "&redirect_uri=" + encodeURIComponent(redirectUri)
-        + "&scope=" + encodeURIComponent(OAUTH_SCOPES)
-        + "&state=" + encodeURIComponent(state)
-        + "&code_challenge=" + encodeURIComponent(challenge)
-        + "&code_challenge_method=S256";
-      location.href = url;
-    } catch(e){ alert("启动 OAuth 失败：浏览器不支持 WebCrypto（需要 HTTPS）"); }
   };
   function renderSaved(){
     var cont = el("savedAccounts"); var arr = loadSaved(); cont.innerHTML = "";
@@ -263,7 +333,9 @@ if(page === "oauth-callback"){
       refresh_token: res.refresh_token || "", expires_at: Date.now() + (res.expires_in || 3600) * 1000,
       client_id: clientId, added: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }).replace(/\//g, "-") };
     var arr = loadSaved();
-    arr.unshift(acc); saveAccounts(arr);
+    arr.unshift(acc);
+    arr = dedupeAccounts(arr);
+    saveAccounts(arr);
     localStorage.setItem("cfm_active_idx", "0");
     localStorage.removeItem("cfm_accountId");
     location.href = "/app";
@@ -424,11 +496,12 @@ async function refreshWorkers(){
     html += "<div class=\"worker-domains\" style=\"margin-top:8px\"><div class=\"small\">自定义域名</div>";
     if(domains.length){
       domains.forEach(function(dm){
-        var st = dm.status || "active";
-        html += "<span style=\"display:inline-block;position:relative\"><a href=\"https://" + escA(dm.hostname) + "\" target=\"_blank\" class=\"domain-tag\">" + esc(dm.hostname) + "<span class=\"domain-status " + (st === "active" ? "active" : "pending") + "\">" + (st === "active" ? "已启用" : esc(st)) + "</span></a><span class=\"del-domain-btn\" title=\"解绑\" data-deldom=\"" + escA(dm.id) + "|" + escA(name) + "|" + escA(dm.hostname) + "\">✕</span></span>";
+        html += "<span class=\"domain-tag\" style=\"display:inline-flex;align-items:center;gap:6px\"><a href=\"https://" + escA(dm.hostname) + "\" target=\"_blank\" style=\"color:inherit;text-decoration:none\">" + esc(dm.hostname) + "</a><span class=\"del-domain-btn\" title=\"解绑\" data-deldom=\"" + escA(dm.id) + "|" + escA(name) + "|" + escA(dm.hostname) + "\" style=\"margin-left:0\">✕</span></span>";
       });
     } else { html += "<span class=\"small\" style=\"color:#94a3b8\">暂无</span>"; }
-    html += "</div></div>";
+    html += "</div>";
+    html += "<div class=\"worker-domains\" style=\"margin-top:8px\"><div class=\"small\">路由域名</div><div data-routeswrap=\"" + escA(name) + "\"><span class=\"small\" style=\"color:#94a3b8\">加载中...</span></div></div>";
+    html += "</div>";
     html += "<div class=\"worker-right\"><div class=\"worker-tag-rows\">";
     html += tagRow("环境变量", envB.map(function(b){
       return b.type === "secret_text"
@@ -439,14 +512,14 @@ async function refreshWorkers(){
     html += tagRow("D1", d1B.map(function(b){ return "<span class=\"res-tag d1\">" + esc(b.name) + "</span>"; }).join(""));
     var cronNames = (w.cronTriggers || []).map(function(c){ return typeof c === "string" ? c : (c.cron || ""); }).filter(function(c){ return !!c; });
     html += tagRow("Cron", cronNames.map(function(c){ return "<span class=\"res-tag cron\">" + esc(c) + "</span>"; }).join(""));
-    if(r2B.length) html += tagRow("R2", r2B.map(function(b){ return "<span class=\"res-tag r2\">" + esc(b.name) + "</span>"; }).join(""));
+    html += tagRow("R2", r2B.map(function(b){ return "<span class=\"res-tag r2\">" + esc(b.name) + "</span>"; }).join(""));
     html += "</div><div class=\"btns\">";
     html += "<button class=\"btn\" data-act=\"env\" data-name=\"" + escA(name) + "\">环境</button>";
     html += "<button class=\"btn\" data-act=\"bind\" data-name=\"" + escA(name) + "\">绑定</button>";
     html += "<button class=\"btn\" data-act=\"compat\" data-name=\"" + escA(name) + "\">兼容日期</button>";
     html += "<button class=\"btn\" data-act=\"compatflags\" data-name=\"" + escA(name) + "\">兼容标志</button>";
     html += "<button class=\"btn\" data-act=\"cron\" data-name=\"" + escA(name) + "\">Cron</button>";
-    html += "<button class=\"btn\" data-act=\"domain\" data-name=\"" + escA(name) + "\">域名</button>";
+    html += "<button class=\"btn\" data-act=\"domain\" data-name=\"" + escA(name) + "\">域名/路由</button>";
     html += "<button class=\"btn\" data-act=\"versions\" data-name=\"" + escA(name) + "\">版本</button>";
     html += "<button class=\"btn\" data-act=\"edit\" data-name=\"" + escA(name) + "\">编辑</button>";
     html += "<button class=\"btn danger\" data-act=\"delete\" data-name=\"" + escA(name) + "\">删除</button>";
@@ -463,6 +536,7 @@ async function refreshWorkers(){
       deleteWorkerDomain(parts[1], parts[0], parts[2]);
     });
   });
+  loadAllWorkerRoutes();
   Array.from(list.querySelectorAll(".btns .btn")).forEach(function(b){
     b.addEventListener("click", function(){
       var act = this.getAttribute("data-act"), nm = this.getAttribute("data-name");
@@ -479,6 +553,36 @@ async function refreshWorkers(){
   });
   updateWorkerMetrics();
 }
+// ---- Worker 卡片上的路由域名 ----
+async function loadAllWorkerRoutes(){
+  var wraps = document.querySelectorAll("[data-routeswrap]");
+  if(!wraps.length) return;
+  var r = await api("list-worker-routes-all", { accountId: currentAccountId });
+  var byScript = (r && r.success && r.result) || {};
+  Array.from(wraps).forEach(function(wrap){
+    var name = wrap.getAttribute("data-routeswrap");
+    var routes = byScript[name] || [];
+    if(!routes.length){ wrap.innerHTML = "<span class=\"small\" style=\"color:#94a3b8\">暂无</span>"; return; }
+    wrap.innerHTML = routes.map(function(rt){
+      var host = String(rt.pattern).split("/")[0].replace(/^\*\./, "");
+      return "<span class=\"domain-tag\" style=\"display:inline-flex;align-items:center;gap:6px\" title=\"区域：" + escA(rt.zoneName) + "\"><a href=\"https://" + escA(host) + "\" target=\"_blank\" style=\"color:inherit;text-decoration:none\">" + esc(rt.pattern) + "</a><span class=\"del-domain-btn\" title=\"删除路由\" data-delroute=\"" + escA(rt.zoneId) + "|" + escA(rt.id) + "|" + escA(rt.pattern) + "\" style=\"margin-left:0\">✕</span></span>";
+    }).join("");
+    Array.from(wrap.querySelectorAll("[data-delroute]")).forEach(function(s){
+      s.addEventListener("click", function(){
+        var parts = this.getAttribute("data-delroute").split("|");
+        deleteWorkerRouteFromCard(parts[0], parts[1], parts[2]);
+      });
+    });
+  });
+}
+async function deleteWorkerRouteFromCard(zoneId, routeId, pattern){
+  if(!confirm("确定删除路由 " + pattern + " 吗？")) return;
+  var r = await api("delete-worker-route", { accountId: currentAccountId, zoneId: zoneId, routeId: routeId });
+  if(r && r.success){ showNotification("路由已删除"); loadAllWorkerRoutes(); }
+  else showNotification((r && r.error) || "删除路由失败", "error");
+}
+window.deleteWorkerRouteFromCard = deleteWorkerRouteFromCard;
+window.loadAllWorkerRoutes = loadAllWorkerRoutes;
 async function updateWorkerMetrics(){
   try {
     var r = await api("get-usage-today", { accountId: currentAccountId });
@@ -488,7 +592,73 @@ async function updateWorkerMetrics(){
       el("metricSub").textContent = "Workers " + r.data.workers.toLocaleString() + " · Pages " + r.data.pages.toLocaleString();
     }
   } catch(e){}
+  refreshUsageCharts();
 }
+// ---- 用量图表 ----
+function drawTimeChart(canvas, rows){
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  if(!rows || !rows.length){ ctx.fillStyle = "#9ca3af"; ctx.font = "14px sans-serif"; ctx.fillText("暂无数据", 20, 40); return; }
+  var dark = document.documentElement.getAttribute("data-theme") === "dark";
+  var max = Math.max.apply(null, rows.map(function(r){ return r.requests; }).concat([1]));
+  var padL = 50, padR = 10, padT = 10, padB = 24;
+  var cw = W - padL - padR, ch = H - padT - padB;
+  // 网格线 + Y 轴标签
+  ctx.strokeStyle = dark ? "#334155" : "#e5e7eb";
+  ctx.fillStyle = dark ? "#94a3b8" : "#6b7280";
+  ctx.font = "11px sans-serif";
+  for(var i = 0; i <= 4; i++){
+    var v = Math.round(max * i / 4), y = padT + ch - ch * i / 4;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+    ctx.fillText(v.toLocaleString(), 6, y + 4);
+  }
+  // 折线
+  var pts = rows.map(function(r, idx){
+    return [padL + cw * idx / Math.max(1, rows.length - 1), padT + ch - ch * r.requests / max];
+  });
+  ctx.beginPath();
+  pts.forEach(function(p, idx){ idx ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); });
+  ctx.strokeStyle = "#f97316"; ctx.lineWidth = 2; ctx.stroke();
+  // 填充
+  ctx.lineTo(pts[pts.length-1][0], padT + ch); ctx.lineTo(pts[0][0], padT + ch); ctx.closePath();
+  var g = ctx.createLinearGradient(0, padT, 0, padT + ch);
+  g.addColorStop(0, "rgba(249,115,22,0.25)"); g.addColorStop(1, "rgba(249,115,22,0.02)");
+  ctx.fillStyle = g; ctx.fill();
+  // X 轴时间标签（每 4 个点标一个）
+  ctx.fillStyle = dark ? "#94a3b8" : "#6b7280";
+  rows.forEach(function(r, idx){
+    if(idx % 4 !== 0 && idx !== rows.length - 1) return;
+    var t = r.time ? r.time.slice(5, 16).replace("T", " ") : "";
+    ctx.fillText(t, pts[idx][0] - 30, H - 8);
+  });
+}
+async function refreshUsageCharts(){
+  var cv = el("usageTimeChart"), bars = el("usageWorkerBars");
+  if(!cv || !bars) return;
+  if(!currentAccountId) return;
+  try {
+    var r = await api("get-usage-timeseries", { accountId: currentAccountId });
+    var rows = (r && r.success && r.result) || [];
+    cv._chartRows = rows;
+    drawTimeChart(cv, rows);
+  } catch(e){ drawTimeChart(cv, []); }
+  try {
+    var r2 = await api("get-usage-per-worker", { accountId: currentAccountId });
+    var list = (r2 && r2.success && r2.result) || [];
+    if(!list.length){ bars.innerHTML = "<div class=\"small\" style=\"color:#9ca3af\">今日暂无请求</div>"; return; }
+    var max = Math.max.apply(null, list.map(function(x){ return x.count; }).concat([1]));
+    bars.innerHTML = list.slice(0, 10).map(function(x){
+      var pct = Math.max(2, x.count / max * 100);
+      return "<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:6px\">" +
+        "<div style=\"width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px\" title=\"" + escA(x.name) + "\">" + esc(x.name) + "</div>" +
+        "<div style=\"flex:1;background:#f1f5f9;border-radius:4px;height:18px;position:relative\">" +
+        "<div style=\"background:#f97316;height:100%;border-radius:4px;width:" + pct.toFixed(1) + "%\"></div></div>" +
+        "<div style=\"width:100px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums\">" + x.count.toLocaleString() + (x.errors ? " <span style=\"color:#ef4444\">(" + x.errors + "错)</span>" : "") + "</div></div>";
+    }).join("");
+  } catch(e){}
+}
+window.refreshUsageCharts = refreshUsageCharts;
 async function toggleWorkerSubdomain(name, enabled){
   var r = await api("toggle-worker-subdomain", { accountId: currentAccountId, scriptName: name, enabled: enabled });
   if(r && r.success){ showNotification(enabled ? "workers.dev 已启用" : "workers.dev 已禁用"); setTimeout(refreshWorkers, 800); }
@@ -497,21 +667,95 @@ async function toggleWorkerSubdomain(name, enabled){
 window.toggleWorkerSubdomain = toggleWorkerSubdomain;
 var currentWorkerForDomain = "";
 var domainZonesCache = [];
+var domainZonesFull = [];
 async function openAddDomainModal(name){
-  currentWorkerForDomain = name; el("newDomainPrefix").value = ""; domainZonesCache = [];
+  currentWorkerForDomain = name; el("newDomainPrefix").value = ""; domainZonesCache = []; domainZonesFull = [];
+  if(el("newRoutePrefix")) el("newRoutePrefix").value = "";
+  if(el("drPaneDomain")) switchDomainRouteTab("domain");
   el("addDomainModal").style.display = "flex";
-  el("domainZoneWrap").innerHTML = '<div class="small">加载域名中...</div>'; updateDomainPreview();
+  el("domainZoneWrap").innerHTML = '<div class="small">加载域名中...</div>';
+  el("routeZoneWrap").innerHTML = '<div class="small">加载中...</div>';
+  el("routeList").innerHTML = '<div class="small">选择区域后加载</div>';
+  updateDomainPreview(); updateRoutePreview();
   var r = await api("list-zones");
   var zones = (r && r.success && r.result) ? r.result : [];
   domainZonesCache = zones.map(function(z){ return z.name; });
-  if(!zones.length) el("domainZoneWrap").innerHTML = '<div class="small" style="color:#ef4444">该账号下没有可用域名，请先到「域名管理」添加</div>';
-  else if(zones.length === 1) el("domainZoneWrap").innerHTML = '<div style="font-size:15px;font-weight:600">' + esc(zones[0].name) + '</div>';
+  domainZonesFull = zones.map(function(z){ return { id: z.id, name: z.name }; });
+  if(!zones.length){
+    el("domainZoneWrap").innerHTML = '<div class="small" style="color:#ef4444">该账号下没有可用域名，请先到「域名管理」添加</div>';
+    el("routeZoneWrap").innerHTML = '<div class="small" style="color:#ef4444">无可用域名</div>';
+  }
+  else if(zones.length === 1){
+    el("domainZoneWrap").innerHTML = '<div style="font-size:15px;font-weight:600">' + esc(zones[0].name) + '</div>';
+    el("routeZoneWrap").innerHTML = '<div style="font-size:15px;font-weight:600">' + esc(zones[0].name) + '</div>';
+  }
   else {
     var opts = zones.map(function(z){ return '<option value="' + esc(z.name) + '">' + esc(z.name) + '</option>'; }).join("");
     el("domainZoneWrap").innerHTML = '<select id="newDomainZone" class="input" onchange="updateDomainPreview()">' + opts + '</select>';
+    el("routeZoneWrap").innerHTML = '<select id="newRouteZone" class="input" onchange="updateRoutePreview();loadWorkerRoutes()">' + opts + '</select>';
   }
-  updateDomainPreview();
+  updateDomainPreview(); updateRoutePreview();
+  loadWorkerRoutes();
 }
+function selectedRouteZone(){
+  var sel = el("newRouteZone");
+  var name = "";
+  if(sel) name = sel.value; else if(domainZonesFull.length === 1) name = domainZonesFull[0].name;
+  for(var i = 0; i < domainZonesFull.length; i++){ if(domainZonesFull[i].name === name) return domainZonesFull[i]; }
+  return null;
+}
+function updateRoutePreview(){
+  var z = selectedRouteZone();
+  var prefix = el("newRoutePrefix") ? el("newRoutePrefix").value.trim().replace(/\.$/, "") : "";
+  var pv = el("routePreview"); if(!pv) return;
+  if(!z){ pv.textContent = ""; return; }
+  pv.textContent = (prefix ? (prefix + "." + z.name) : z.name) + "/*";
+}
+async function loadWorkerRoutes(){
+  var z = selectedRouteZone();
+  var box = el("routeList"); if(!box) return;
+  if(!z){ box.innerHTML = '<div class="small">无可用区域</div>'; return; }
+  box.innerHTML = '<div class="small">加载中...</div>';
+  var r = await api("list-worker-routes", { accountId: currentAccountId, zoneId: z.id, scriptName: currentWorkerForDomain });
+  var rows = (r && r.success && r.result) || [];
+  if(!rows.length){ box.innerHTML = '<div class="small" style="color:#9ca3af">该区域下暂无绑定到此 Worker 的路由</div>'; return; }
+  box.innerHTML = "";
+  rows.forEach(function(rt){
+    var d = document.createElement("div");
+    d.className = "kv-item";
+    d.innerHTML = '<div style="flex:1;min-width:0;font-family:monospace;font-size:13px;word-break:break-all">' + esc(rt.pattern) + '</div><div class="btns"><button class="btn small danger">删除</button></div>';
+    d.querySelector("button").addEventListener("click", function(){ deleteWorkerRoute(rt.id); });
+    box.appendChild(d);
+  });
+}
+async function confirmAddRoute(){
+  var z = selectedRouteZone();
+  if(!z) return showNotification("没有可用域名", "error");
+  var prefix = el("newRoutePrefix").value.trim().replace(/\.$/, "");
+  var pattern = (prefix ? (prefix + "." + z.name) : z.name) + "/*";
+  var r = await api("add-worker-route", { accountId: currentAccountId, zoneId: z.id, pattern: pattern, scriptName: currentWorkerForDomain });
+  if(r && r.success){ showNotification("路由添加成功：" + pattern); el("newRoutePrefix").value = ""; updateRoutePreview(); loadWorkerRoutes(); }
+  else showNotification((r && r.error) || "添加路由失败", "error");
+}
+async function deleteWorkerRoute(routeId){
+  var z = selectedRouteZone();
+  if(!z) return;
+  if(!confirm("确定删除这条路由吗？")) return;
+  var r = await api("delete-worker-route", { accountId: currentAccountId, zoneId: z.id, routeId: routeId });
+  if(r && r.success){ showNotification("路由已删除"); loadWorkerRoutes(); }
+  else showNotification((r && r.error) || "删除路由失败", "error");
+}
+window.updateRoutePreview = updateRoutePreview; window.confirmAddRoute = confirmAddRoute;
+window.loadWorkerRoutes = loadWorkerRoutes; window.deleteWorkerRoute = deleteWorkerRoute;
+function switchDomainRouteTab(which){
+  var isDomain = which === "domain";
+  el("drPaneDomain").style.display = isDomain ? "" : "none";
+  el("drPaneRoute").style.display = isDomain ? "none" : "";
+  el("drTabDomain").classList.toggle("active", isDomain);
+  el("drTabRoute").classList.toggle("active", !isDomain);
+  if(!isDomain) loadWorkerRoutes();
+}
+window.switchDomainRouteTab = switchDomainRouteTab;
 function updateDomainPreview(){
   var prefix = el("newDomainPrefix").value.trim().replace(/\.$/, "");
   var zone = "", sel = el("newDomainZone");
@@ -1952,6 +2196,7 @@ async function d1ShowTables(){
   el("d1Query").value = "SELECT name, sql FROM sqlite_master WHERE type=\"table\" ORDER BY name;";
   executeD1Query();
 }
+
 var d1ExportTimer = null;
 function openD1Export(){
   if(!el("d1DatabaseSelect").value) return showNotification("请先选择数据库", "error");
@@ -2456,46 +2701,160 @@ function viewZoneDNS(id, name){
   el("selectedZoneName").textContent = name + " - DNS 记录";
   refreshDNSRecords();
 }
+var _dnsRecordsCache = [];
 async function refreshDNSRecords(){
   el("dnsRecordsList").innerHTML = "加载中...";
   var r = await api("list-dns-records", { zoneId: currentZoneId });
   var arr = (r && r.result) || [];
+  _dnsRecordsCache = arr;
   if(!arr.length){ el("dnsRecordsList").innerHTML = "<div style=\"text-align:center;padding:20px;color:#6b7280\">暂无 DNS 记录</div>"; return; }
-  var html = "<table class=\"table\"><thead><tr><th>类型</th><th>名称</th><th>内容</th><th>TTL</th><th>代理</th><th style=\"text-align:right\">操作</th></tr></thead><tbody>";
+  var html = "<table class=\"table\"><thead><tr><th>名称</th><th>类型</th><th>内容</th><th>代理状态</th><th>TTL</th><th style=\"text-align:right\">操作</th></tr></thead><tbody>";
   arr.forEach(function(x){
-    html += "<tr><td><span class=\"pill\">" + esc(x.type) + "</span></td><td>" + esc(x.name) + "</td><td style=\"max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\" title=\"" + escA(x.content) + "\">" + esc(x.content) + "</td><td>" + (x.ttl === 1 ? "自动" : x.ttl) + "</td><td>" + (x.proxied ? "<span class=\"pill amber\">已代理</span>" : "关闭") + "</td>" +
-      "<td style=\"text-align:right;white-space:nowrap\"><button class=\"btn small\" data-a=\"edit\" data-id=\"" + escA(x.id) + "\">编辑</button> <button class=\"btn small danger\" data-a=\"del\" data-id=\"" + escA(x.id) + "\">删除</button></td></tr>";
+    // Worker 绑定的记录（AAAA/100::）：仿官方面板显示为 Worker 类型 + Worker 名
+    var isWorkerRec = (x.type === "AAAA" && x.content === "100::");
+    var showType = isWorkerRec ? "Worker" : x.type;
+    var showContent = (isWorkerRec && x.worker_name) ? x.worker_name : x.content;
+    var proxyHtml = x.proxied
+      ? "<span style=\"color:#f6821f;font-size:15px\">☁</span> <span style=\"color:#f6821f\">已代理</span>"
+      : "<span style=\"color:#9ca3af;font-size:15px\">☁</span> <span style=\"color:#6b7280\">仅 DNS</span>";
+    html += "<tr><td>" + esc(x.name) + "</td><td>" + esc(showType) + "</td><td style=\"max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\" title=\"" + escA(showContent) + "\">" + esc(showContent) + "</td><td style=\"white-space:nowrap\">" + proxyHtml + "</td><td>" + (x.ttl === 1 ? "自动" : x.ttl) + "</td>" +
+      "<td style=\"text-align:right;white-space:nowrap\">" + (isWorkerRec ? "<span class=\"small\" style=\"color:#9ca3af\">—</span>" : "<button class=\"btn small primary\" data-a=\"edit\" data-id=\"" + escA(x.id) + "\">编辑</button>") + " <button class=\"btn small danger\" data-a=\"del\" data-id=\"" + escA(x.id) + "\">删除</button></td></tr>";
   });
   el("dnsRecordsList").innerHTML = html + "</tbody></table>";
-  Array.from(el("dnsRecordsList").querySelectorAll("button")).forEach(function(b){
+  Array.from(el("dnsRecordsList").querySelectorAll("[data-a]")).forEach(function(b){
     b.addEventListener("click", function(){
       var a = this.getAttribute("data-a"), id = this.getAttribute("data-id");
       if(a === "edit") editDNSRecord(id); else deleteDNSRecord(id);
     });
   });
 }
-function openAddDNSRecord(){ el("addDNSRecordModal").style.display = "flex"; }
+// ---- DNS 记录类型元数据（仿 Cloudflare 官方添加记录弹窗）----
+var DNS_TYPES = ["A","AAAA","CAA","CERT","CNAME","DNSKEY","DS","HTTPS","LOC","MX","NAPTR","NS","OPENPGPKEY","PTR","SMIMEA","SRV","SSHFP","SVCB","TLSA","TXT"];
+var DNS_TYPE_META = {
+  A:     { label: "IPv4 地址", ph: "192.0.2.1", proxy: true, hint: "指向 IPv4 地址" },
+  AAAA:  { label: "IPv6 地址", ph: "2001:db8::1", proxy: true, hint: "指向 IPv6 地址" },
+  CNAME: { label: "目标", ph: "example.com", proxy: true, hint: "是 {t} 的别名并通过 Cloudflare 代理其流量" },
+  HTTPS: { label: "目标", ph: "example.com", proxy: true, hint: "是 {t} 的别名并通过 Cloudflare 代理其流量" },
+  MX:    { label: "邮件服务器", ph: "mail.example.com", priority: true, hint: "的邮件由 {t} 处理" },
+  TXT:   { label: "内容", ph: "文本内容", hint: "的文本记录" },
+  NS:    { label: "名称服务器", ph: "ns1.example.com", hint: "的名称服务器是 {t}" },
+  SRV:   { label: "目标", ph: "example.com", srv: true, hint: "的服务记录指向 {t}" },
+  CAA:   { label: "内容", ph: "0 issue \"letsencrypt.org\"", hint: "的证书颁发机构授权记录" },
+  PTR:   { label: "目标", ph: "example.com", hint: "反向解析到 {t}" }
+};
+function dnsTypeMeta(t){ return DNS_TYPE_META[t] || { label: "目标", ph: "记录内容", hint: "的 " + t + " 记录指向 {t}" }; }
+// 类型/名称/目标变化时更新动态提示语
+function updateDnsHint(){
+  var t = el("dnsRecordType").value, n = (el("dnsRecordName").value || "").trim() || "该记录";
+  var c = (el("dnsRecordContent").value || "").trim() || "[目标]";
+  var meta = dnsTypeMeta(t);
+  var zone = (typeof currentZoneName !== "undefined" && currentZoneName) ? currentZoneName : "";
+  var fullName = n === "@" ? zone : (n ? n + (zone ? "." + zone : "") : "该记录");
+  var hint = "<b>" + esc(fullName) + "</b> " + esc(meta.hint).replace(/\{t\}/g, "<b>" + esc(c) + "</b>");
+  el("dnsHint").innerHTML = hint + "。";
+}
+// 类型切换：更新内容标签、placeholder、代理开关、额外字段
+function onDnsTypeChange(){
+  var t = el("dnsRecordType").value, meta = dnsTypeMeta(t);
+  el("dnsContentLabel").textContent = meta.label;
+  el("dnsRecordContent").placeholder = "例如：" + meta.ph;
+  el("dnsProxyWrap").style.display = meta.proxy ? "" : "none";
+  if(meta.proxy) el("dnsRecordProxied").checked = true;
+  var ex = "";
+  if(meta.priority) ex += "<div class=\"label\" style=\"margin-top:10px\">优先级</div><input id=\"dnsRecordPriority\" class=\"input\" placeholder=\"例如：10\" style=\"max-width:200px\">";
+  if(meta.srv) ex += "<div style=\"display:flex;gap:12px;margin-top:10px\"><div style=\"flex:1\"><div class=\"label\">优先级</div><input id=\"dnsRecordPriority\" class=\"input\" placeholder=\"0\"></div><div style=\"flex:1\"><div class=\"label\">权重</div><input id=\"dnsRecordWeight\" class=\"input\" placeholder=\"0\"></div><div style=\"flex:1\"><div class=\"label\">端口</div><input id=\"dnsRecordPort\" class=\"input\" placeholder=\"80\"></div></div>";
+  el("dnsExtraFields").innerHTML = ex;
+  updateDnsHint();
+}
+function openAddDNSRecord(){
+  el("addDNSRecordModal").style.display = "flex";
+  // 填充类型下拉（只填一次）
+  var sel = el("dnsRecordType");
+  if(!sel.options.length){
+    DNS_TYPES.forEach(function(t){ var o = document.createElement("option"); o.value = t; o.textContent = t; sel.appendChild(o); });
+  }
+  // 重置表单
+  sel.value = "A"; el("dnsRecordName").value = ""; el("dnsRecordContent").value = "";
+  el("dnsRecordTTL").value = "1"; el("dnsProxyText").textContent = "已代理";
+  onDnsTypeChange();
+}
 function closeAddDNSRecordModal(){ el("addDNSRecordModal").style.display = "none"; }
 async function confirmAddDNSRecord(){
   var t = el("dnsRecordType").value, n = el("dnsRecordName").value.trim(), c = el("dnsRecordContent").value.trim();
   if(!n || !c) return showNotification("请填写完整", "error");
-  var r = await api("create-dns-record", { zoneId: currentZoneId, type: t, name: n, content: c, ttl: parseInt(el("dnsRecordTTL").value, 10), proxied: el("dnsRecordProxied").checked });
+  var body = { zoneId: currentZoneId, type: t, name: n, content: c, ttl: parseInt(el("dnsRecordTTL").value, 10), proxied: el("dnsRecordProxied") ? el("dnsRecordProxied").checked : false };
+  var meta = dnsTypeMeta(t);
+  if(meta.srv){
+    var pri = (el("dnsRecordPriority") || {}).value || "0", wei = (el("dnsRecordWeight") || {}).value || "0", port = (el("dnsRecordPort") || {}).value || "0";
+    body.content = pri + " " + wei + " " + port + " " + c;
+    body.priority = parseInt(pri, 10) || 0;
+  } else if(meta.priority){
+    var p0 = (el("dnsRecordPriority") || {}).value || "10";
+    body.priority = parseInt(p0, 10) || 0;
+  }
+  if(!meta.proxy) body.proxied = false;
+  var r = await api("create-dns-record", body);
   if(r && r.success){ showNotification("添加成功"); closeAddDNSRecordModal(); refreshDNSRecords(); } else showNotification((r && r.error) || "添加失败", "error");
 }
 async function editDNSRecord(id){
-  var r = await api("list-dns-records", { zoneId: currentZoneId });
-  var rec = ((r && r.result) || []).find(function(x){ return x.id === id; });
+  // 优先用列表缓存，秒开；缓存没有再调接口
+  var rec = (_dnsRecordsCache || []).find(function(x){ return x.id === id; });
+  if(!rec){
+    var r = await api("list-dns-records", { zoneId: currentZoneId });
+    rec = ((r && r.result) || []).find(function(x){ return x.id === id; });
+  }
   if(!rec) return showNotification("未找到记录", "error");
   currentEditingRecord = rec;
+  var sel = el("editDnsRecordType");
+  if(!sel.options.length){
+    DNS_TYPES.forEach(function(t){ var o = document.createElement("option"); o.value = t; o.textContent = t; sel.appendChild(o); });
+  }
+  sel.value = rec.type;
   el("editDnsRecordName").value = rec.name; el("editDnsRecordContent").value = rec.content;
   el("editDnsRecordTTL").value = String(rec.ttl); el("editDnsRecordProxied").checked = !!rec.proxied;
+  el("editDnsProxyText").textContent = rec.proxied ? "已代理" : "仅 DNS";
+  onEditDnsTypeChange();
   el("editDNSRecordModal").style.display = "flex";
 }
-function closeEditDNSRecordModal(){ el("editDNSRecordModal").style.display = "none"; currentEditingRecord = null; }
-async function confirmEditDNSRecord(){
-  var r = await api("update-dns-record", { zoneId: currentZoneId, recordId: currentEditingRecord.id, name: el("editDnsRecordName").value.trim(), content: el("editDnsRecordContent").value.trim(), ttl: parseInt(el("editDnsRecordTTL").value, 10), proxied: el("editDnsRecordProxied").checked });
-  if(r && r.success){ showNotification("更新成功"); closeEditDNSRecordModal(); refreshDNSRecords(); } else showNotification((r && r.error) || "更新失败", "error");
+// 编辑弹窗类型切换：更新内容标签、代理开关可见性；类型变了则提示会删旧建新
+function onEditDnsTypeChange(){
+  var t = el("editDnsRecordType").value, meta = dnsTypeMeta(t);
+  el("editDnsContentLabel").textContent = meta.label;
+  var proxyable = (t === "A" || t === "AAAA" || t === "CNAME" || t === "HTTPS");
+  el("editDnsProxyWrap").style.display = proxyable ? "" : "none";
+  var changed = currentEditingRecord && t !== currentEditingRecord.type;
+  el("editDnsTypeTip").textContent = changed ? "注意：类型已变更（" + currentEditingRecord.type + " → " + t + "），保存时将删除旧记录并新建。" : "";
 }
+var _editingSaving = false;
+async function confirmEditDNSRecord(){
+  if(_editingSaving) return;
+  _editingSaving = true;
+  try {
+  var rec = currentEditingRecord;
+  var newType = el("editDnsRecordType").value;
+  var name = el("editDnsRecordName").value.trim(), content = el("editDnsRecordContent").value.trim();
+  if(!name || !content) return showNotification("请填写完整", "error");
+  var ttl = parseInt(el("editDnsRecordTTL").value, 10);
+  var proxied = el("editDnsRecordProxied").checked;
+  var proxyable = (newType === "A" || newType === "AAAA" || newType === "CNAME" || newType === "HTTPS");
+  if(!proxyable) proxied = false;
+  // 类型变更：Cloudflare 不支持直接改类型，走删除旧记录+新建
+  if(rec && newType !== rec.type){
+    var del = await api("delete-dns-record", { zoneId: currentZoneId, recordId: rec.id });
+    var delOk = del && del.success;
+    // 记录已不存在也视为删除成功（可能重复点击或缓存滞后），继续新建
+    if(!delOk && del && /not exist|not found|404/i.test(String(del.error || ""))) delOk = true;
+    if(!delOk) return showNotification("删除旧记录失败：" + ((del && del.error) || ""), "error");
+    var cr = await api("create-dns-record", { zoneId: currentZoneId, type: newType, name: name, content: content, ttl: ttl, proxied: proxied });
+    if(cr && cr.success){ showNotification("类型已变更，旧记录已删除并新建"); closeEditDNSRecordModal(); refreshDNSRecords(); }
+    else showNotification("新建记录失败：" + ((cr && cr.error) || ""), "error");
+    return;
+  }
+  var r = await api("update-dns-record", { zoneId: currentZoneId, recordId: rec.id, name: name, content: content, ttl: ttl, proxied: proxied });
+  if(r && r.success){ showNotification("更新成功"); closeEditDNSRecordModal(); refreshDNSRecords(); } else showNotification((r && r.error) || "更新失败", "error");
+  } finally { _editingSaving = false; }
+}
+function closeEditDNSRecordModal(){ el("editDNSRecordModal").style.display = "none"; currentEditingRecord = null; }
 async function deleteDNSRecord(id){
   if(!confirm("删除此 DNS 记录？")) return;
   var r = await api("delete-dns-record", { zoneId: currentZoneId, recordId: id });
@@ -2520,6 +2879,8 @@ async function confirmDnsBatchImport(){
 window.refreshZones = refreshZones; window.openAddZone = openAddZone; window.closeAddZoneModal = closeAddZoneModal; window.confirmAddZone = confirmAddZone;
 window.viewZoneDNS = viewZoneDNS; window.refreshDNSRecords = refreshDNSRecords;
 window.openAddDNSRecord = openAddDNSRecord; window.closeAddDNSRecordModal = closeAddDNSRecordModal; window.confirmAddDNSRecord = confirmAddDNSRecord;
+window.onDnsTypeChange = onDnsTypeChange; window.updateDnsHint = updateDnsHint;
+window.onEditDnsTypeChange = onEditDnsTypeChange;
 window.editDNSRecord = editDNSRecord; window.closeEditDNSRecordModal = closeEditDNSRecordModal; window.confirmEditDNSRecord = confirmEditDNSRecord;
 window.openDnsBatchImport = openDnsBatchImport; window.closeDnsBatchImport = closeDnsBatchImport; window.confirmDnsBatchImport = confirmDnsBatchImport;
 window.copyToClipboard = copyToClipboard;
@@ -3065,6 +3426,12 @@ window.saveSubdomain = saveSubdomain;
 window.debugOut = debugOut; window.closeOut = closeOut;
 async function initApp(){
   if(!getActiveAccount()){ location.href = "/login"; return; }
+  // 同步主题切换按钮文字
+  try {
+    var _t = localStorage.getItem("cfm_theme") || "light";
+    var _tb = el("themeToggleBtn");
+    if(_tb) _tb.textContent = _t === "dark" ? "☀️ 浅色模式" : "🌙 深色模式";
+  } catch(e){}
   // 存量 OAuth 账号标签迁移：把通用的“OAuth 授权”换成真实邮箱（只对旧存档跑一次）
   try {
     var _ma = getActiveAccount();
@@ -3102,6 +3469,50 @@ async function initApp(){
     el("authModeBadge").textContent = modeTxt;
     el("authModeBadge").className = "pill " + pillCls;
     el("authModeInfo").textContent = "当前使用 " + (a.mode === "token" ? "API Token（推荐）" : (a.mode === "oauth" ? "OAuth 2.0 授权" : "Global API Key（旧版）")) + " 鉴权 · " + label;
+// ---- Token 权限自检 ----
+async function checkTokenPermissions(){
+  var box = el("tokenPermResults");
+  box.innerHTML = "<div class=\"small\">检测中...</div>";
+  var aid = await ensureAccountId(); if(!aid){ box.innerHTML = ""; return; }
+  var r = await api("check-token-permissions", { accountId: aid });
+  var list = (r && r.success && r.result) || [];
+  if(!list.length){ box.innerHTML = "<div class=\"small\" style=\"color:#ef4444\">检测失败：" + esc((r && r.error) || "") + "</div>"; return; }
+  var okCount = list.filter(function(x){ return x.ok; }).length;
+  var html = "<div class=\"small\" style=\"margin-bottom:8px\">检测结果：" + okCount + " / " + list.length + " 项可用</div>";
+  html += list.map(function(x){
+    var line = "<div style=\"display:flex;align-items:center;gap:8px;margin-bottom:6px\">" +
+      "<span style=\"font-size:16px\">" + (x.ok ? "✅" : "❌") + "</span>" +
+      "<span style=\"font-size:13px;font-weight:600;width:100px\">" + esc(x.label) + "</span>" +
+      "<span class=\"small\" style=\"color:" + (x.ok ? "#16a34a" : "#ef4444") + "\">" + (x.ok ? "正常" : esc(x.error || "无权限")) + "</span></div>";
+    if(!x.ok){
+      if(x.hint === "__R2_NOT_ENABLED__"){
+        line += "<div class=\"small\" style=\"margin:0 0 10px 24px;color:#92400e\">💡 R2 还没有开通：到 Cloudflare 控制台左侧点「R2 对象存储」按提示开通（免费），这不是 Token 权限问题。</div>";
+      } else if(x.hint){
+        line += "<div class=\"small\" style=\"margin:0 0 10px 24px;color:#92400e\">💡 解决办法：到 Cloudflare 控制台 → 右上角头像 → 我的个人资料 → API 令牌 → 编辑此令牌，在权限搜索框输入「" + esc(x.hint) + "」，添加对应权限后保存，再回来重新检测。Global API Key 和 OAuth 登录不受此限制。</div>";
+      }
+    }
+    return line;
+  }).join("");
+  if(okCount < list.length){
+    html += "<div class=\"small\" style=\"margin-top:8px;color:#92400e;background:#fef3c7;padding:8px 12px;border-radius:6px\">部分功能不可用，按上面每项的 💡 提示处理即可。</div>";
+  }
+  box.innerHTML = html;
+}
+window.checkTokenPermissions = checkTokenPermissions;
+  } else {
+    // 验证失败：之前会卡在"验证中..."，现在给明确提示；OAuth 过期则提供重新登录按钮
+    var _fa = getActiveAccount();
+    if(_fa){
+      var _fl = accountTitle(_fa);
+      var _fp = _fa.mode === "token" ? "blue" : (_fa.mode === "oauth" ? "green" : "amber");
+      var _fm = _fa.mode === "token" ? "Token" : (_fa.mode === "oauth" ? "OAuth" : "Key");
+      if(_fa.mode === "oauth" && r && (r.oauthExpired || /invalid|expired|revoked|unauthorized|token/i.test(String(r.error || "")))){
+        el("acctInfo").innerHTML = "<span style=\"font-weight:600\">" + esc(_fl) + "</span> <span class=\"pill " + _fp + "\">" + _fm + "</span><br><span class=\"small\" style=\"color:#dc2626\">授权已过期</span><br><button class=\"btn small primary\" style=\"margin-top:6px\" onclick=\"startOAuthLogin()\">重新登录</button>";
+        showNotification("OAuth 授权已过期，请重新使用 Cloudflare 账号登录", "error");
+      } else {
+        el("acctInfo").innerHTML = "<span style=\"font-weight:600\">" + esc(_fl) + "</span> <span class=\"pill " + _fp + "\">" + _fm + "</span><br><span class=\"small\" style=\"color:#dc2626\">验证失败：" + esc((r && r.error) || "请检查凭证") + "</span>";
+      }
+    }
   }
   refreshWorkers();
 }
