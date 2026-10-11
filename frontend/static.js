@@ -2669,6 +2669,7 @@ async function refreshZones(){
       "<div style=\"min-width:0\"><div style=\"font-size:19px;font-weight:700;color:#111827;word-break:break-all\">" + esc(z.name) + "</div>" +
       "<div class=\"small\" style=\"margin-top:4px\">" + esc((z.plan && z.plan.name) || "") + " &nbsp;·&nbsp; <span style=\"font-family:monospace\">" + esc(z.id) + "</span></div></div>" +
       "<div style=\"display:flex;align-items:center;gap:8px;flex-shrink:0\">" + pill +
+      "<button class=\"btn small\" data-a=\"stats\" data-id=\"" + escA(z.id) + "\" data-n=\"" + escA(z.name) + "\">📊 流量</button>" +
       "<button class=\"btn small\" data-a=\"dns\" data-id=\"" + escA(z.id) + "\" data-n=\"" + escA(z.name) + "\">管理 DNS</button>" +
       "<button class=\"trash-btn\" data-a=\"del\" data-id=\"" + escA(z.id) + "\">删除</button></div></div>" + ns + "</div>";
   });
@@ -2678,11 +2679,202 @@ async function refreshZones(){
     b.addEventListener("click", function(){
       var a = this.getAttribute("data-a");
       if(a === "dns") viewZoneDNS(this.getAttribute("data-id"), this.getAttribute("data-n"));
+      else if(a === "stats") openZoneAnalytics(this.getAttribute("data-id"), this.getAttribute("data-n"));
       else if(a === "del") deleteZone(this.getAttribute("data-id"));
     });
   });
 }
 function openAddZone(){ el("addZoneModal").style.display = "flex"; }
+// ---- 域名流量总览 ----
+var COUNTRY_ZH = {HK:"香港",US:"美国",JP:"日本",CN:"中国",SG:"新加坡",TW:"台湾",KR:"韩国",GB:"英国",DE:"德国",FR:"法国",CA:"加拿大",AU:"澳大利亚",IN:"印度",BR:"巴西",RU:"俄罗斯",NL:"荷兰",IT:"意大利",ES:"西班牙",SE:"瑞典",CH:"瑞士",AE:"阿联酋",TH:"泰国",VN:"越南",MY:"马来西亚",ID:"印尼",PH:"菲律宾",TR:"土耳其",PL:"波兰",MX:"墨西哥",AR:"阿根廷",ZA:"南非",EG:"埃及",NG:"尼日利亚",SA:"沙特阿拉伯",IL:"以色列",IE:"爱尔兰",NO:"挪威",DK:"丹麦",FI:"芬兰",BE:"比利时",AT:"奥地利",CZ:"捷克",PT:"葡萄牙",GR:"希腊",UA:"乌克兰",MO:"澳门",NZ:"新西兰",CL:"智利",CO:"哥伦比亚",PE:"秘鲁",PK:"巴基斯坦",BD:"孟加拉国",MM:"缅甸",KH:"柬埔寨",LA:"老挝"};
+function countryFlag(code){
+  if(!code || code.length !== 2) return "🌐";
+  return String.fromCodePoint(127397 + code.charCodeAt(0), 127397 + code.charCodeAt(1));
+}
+function fmtCount(n){
+  n = Number(n) || 0;
+  if(n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if(n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return String(n);
+}
+function fmtBytes(b){
+  b = Number(b) || 0;
+  if(b >= 1e9){ var g = b / 1e9; return (g >= 100 ? g.toFixed(1) : g.toFixed(2)) + " GB"; }
+  if(b >= 1e6){ var m = b / 1e6; return (m >= 100 ? m.toFixed(1) : m.toFixed(2)) + " MB"; }
+  if(b >= 1e3) return (b / 1e3).toFixed(1) + " KB";
+  return b + " B";
+}
+function cmpHtml(label, cur, yest, fmt){
+  var diff = (Number(cur) || 0) - (Number(yest) || 0);
+  var pct = yest ? Math.abs(diff / yest * 100).toFixed(1) : (cur ? "100.0" : "0.0");
+  var arrow = diff > 0 ? "↗" : (diff < 0 ? "↘" : "→");
+  var color = diff > 0 ? "#16a34a" : (diff < 0 ? "#dc2626" : "#9ca3af");
+  return "<div style=\"display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px dashed rgba(128,128,128,0.2)\">" +
+    "<span style=\"font-size:13px\">" + label + "</span>" +
+    "<span style=\"font-size:13px;font-variant-numeric:tabular-nums\"><b>" + fmt(cur) + "</b> <span style=\"color:" + color + ";font-weight:600\">(" + arrow + pct + "%)</span></span></div>";
+}
+var ZA_RANGES = {
+  "30m": { sec: 1800, label: "30 分钟" },
+  "1h": { sec: 3600, label: "1 小时" },
+  "6h": { sec: 21600, label: "6 小时" },
+  "12h": { sec: 43200, label: "12 小时" },
+  "24h": { sec: 86400, label: "24 小时" },
+  "7d": { sec: 604800, label: "7 天" },
+  "14d": { sec: 1209600, label: "14 天" },
+  "30d": { sec: 2592000, label: "30 天" }
+};
+var ZA_OP_LABEL = { eq: "等于", neq: "不等于", like: "包含", nlike: "不包含", starts: "开头为", nstarts: "开头不是", ends: "结尾为", nends: "结尾不是", in: "包含以下各项", nin: "不包含以下各项" };
+var ZA_OPS_TEXT = ["eq", "neq", "like", "nlike", "starts", "nstarts", "ends", "nends", "in", "nin"];
+var ZA_OPS_BASIC = ["eq", "neq", "in", "nin"];
+var ZA_FIELDS = {
+  host: { label: "主机", ops: ZA_OPS_TEXT, type: "text", ph: "如 cf.vvwan.kdns.fr" },
+  path: { label: "路径", ops: ZA_OPS_TEXT, type: "text", ph: "如 /api/" },
+  method: { label: "方法", ops: ZA_OPS_BASIC, type: "select", values: ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"] },
+  country: { label: "国家", ops: ZA_OPS_TEXT, type: "text", ph: "国家代码，如 SG" },
+  ip: { label: "客户端 IP", ops: ZA_OPS_TEXT, type: "text", ph: "如 1.2.3.4" },
+  status: { label: "状态码", ops: ZA_OPS_BASIC, type: "text", ph: "如 200 / 404" },
+  cache: { label: "缓存状态", ops: ZA_OPS_BASIC, type: "select", values: ["hit", "miss", "none", "dynamic", "bypass", "expired", "stale"] },
+  colo: { label: "数据中心", ops: ZA_OPS_TEXT, type: "text", ph: "如 SIN / NRT" },
+  protocol: { label: "HTTP 协议", ops: ZA_OPS_BASIC, type: "select", values: ["HTTP/1.0", "HTTP/1.1", "HTTP/2", "HTTP/3"] },
+  tls: { label: "TLS 版本", ops: ZA_OPS_BASIC, type: "select", values: ["TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3", "none"] }
+};
+var _za = { zoneId: "", zoneName: "", range: "24h", filters: [] };
+function ensureZoneStatsModal(){
+  if(el("zoneStatsModal")) return;
+  var d = document.createElement("div");
+  d.innerHTML = '<div id="zoneStatsModal" class="modal"><div class="modal-box" style="width:660px">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">📊 流量总览</h3>' +
+    '<span style="cursor:pointer;font-size:18px;color:#94a3b8" onclick="closeZoneAnalytics()">&#10005;</span></div>' +
+    '<div class="small" id="zoneStatsName" style="margin-top:4px"></div>' +
+    '<div id="zoneStatsControls" style="margin-top:12px"></div>' +
+    '<div id="zoneStatsBody" style="margin-top:14px"></div></div></div>';
+  document.body.appendChild(d.firstChild);
+}
+function closeZoneAnalytics(){ el("zoneStatsModal").style.display = "none"; }
+window.closeZoneAnalytics = closeZoneAnalytics;
+function zaFilterRowHtml(f){
+  f = f || { f: "host", op: ZA_FIELDS.host.ops[0], v: "" };
+  var def = ZA_FIELDS[f.f];
+  var fieldOpts = Object.keys(ZA_FIELDS).map(function(k){ return "<option value=\"" + k + "\"" + (k === f.f ? " selected" : "") + ">" + ZA_FIELDS[k].label + "</option>"; }).join("");
+  var opOpts = def.ops.map(function(o){ return "<option value=\"" + o + "\"" + (o === f.op ? " selected" : "") + ">" + ZA_OP_LABEL[o] + "</option>"; }).join("");
+  var multi = (f.op === "in" || f.op === "nin");
+  var valHtml = multi
+    ? "<input class=\"input za-v\" style=\"width:190px\" placeholder=\"多个值用逗号分隔\" value=\"" + escA(f.v || "") + "\">"
+    : (def.type === "select"
+      ? "<select class=\"input za-v\" style=\"width:150px\">" + def.values.map(function(v){ return "<option value=\"" + v + "\"" + (v === f.v ? " selected" : "") + ">" + v + "</option>"; }).join("") + "</select>"
+      : "<input class=\"input za-v\" style=\"width:170px\" placeholder=\"" + (def.ph || "") + "\" value=\"" + escA(f.v || "") + "\">");
+  return "<div class=\"za-frow\" style=\"display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center\">" +
+    "<select class=\"input za-f\" style=\"width:112px\" onchange=\"zaFieldChange(this)\">" + fieldOpts + "</select>" +
+    "<select class=\"input za-o\" style=\"width:118px\" onchange=\"zaOpChange(this)\">" + opOpts + "</select>" + valHtml +
+    "<button class=\"btn small\" onclick=\"zaDelFilter(this)\">✕</button></div>";
+}
+function renderZaControls(){
+  var chips = Object.keys(ZA_RANGES).map(function(k){
+    return "<button class=\"btn small" + (k === _za.range ? " primary" : "") + "\" onclick=\"zaSetRange('" + k + "')\">" + ZA_RANGES[k].label + "</button>";
+  }).join("");
+  var rows = _za.filters.map(function(f){ return zaFilterRowHtml(f); }).join("");
+  el("zoneStatsControls").innerHTML =
+    "<div style=\"display:flex;gap:6px;flex-wrap:wrap;align-items:center\"><span class=\"small\" style=\"font-weight:600\">时间范围</span>" + chips + "</div>" +
+    "<div id=\"zaFilters\">" + rows + "</div>" +
+    "<div style=\"display:flex;gap:6px;margin-top:8px\"><button class=\"btn small\" onclick=\"zaAddFilter()\">+ 添加筛选</button>" +
+    (_za.filters.length ? "<button class=\"btn small primary\" onclick=\"zaApplyFilters()\">应用筛选</button>" : "") + "</div>";
+}
+function zaSetRange(k){ _za.range = k; renderZaControls(); loadZoneAnalytics(); }
+window.zaSetRange = zaSetRange;
+function zaCollectFilters(){
+  var out = [];
+  Array.from(document.querySelectorAll(".za-frow")).forEach(function(row){
+    var f = row.querySelector(".za-f").value, o = row.querySelector(".za-o").value, v = row.querySelector(".za-v").value.trim();
+    out.push({ f: f, op: o, v: v });
+  });
+  return out;
+}
+function zaAddFilter(){
+  _za.filters = zaCollectFilters();
+  var keys = Object.keys(ZA_FIELDS);
+  var unused = keys.filter(function(k){ return !_za.filters.some(function(x){ return x.f === k; }); });
+  var nf = unused[0] || "host";
+  _za.filters.push({ f: nf, op: ZA_FIELDS[nf].ops[0], v: "" });
+  renderZaControls();
+}
+window.zaAddFilter = zaAddFilter;
+function zaDelFilter(btn){
+  var rows = Array.from(document.querySelectorAll(".za-frow"));
+  var idx = rows.indexOf(btn.closest(".za-frow"));
+  _za.filters = zaCollectFilters();
+  if(idx >= 0) _za.filters.splice(idx, 1);
+  renderZaControls();
+  loadZoneAnalytics();
+}
+window.zaDelFilter = zaDelFilter;
+function zaFieldChange(sel){
+  _za.filters = zaCollectFilters();
+  var rows = Array.from(document.querySelectorAll(".za-frow"));
+  var idx = rows.indexOf(sel.closest(".za-frow"));
+  if(idx >= 0 && _za.filters[idx]){ _za.filters[idx].f = sel.value; _za.filters[idx].op = ZA_FIELDS[sel.value].ops[0]; _za.filters[idx].v = ""; }
+  else if(idx >= 0){ _za.filters[idx] = { f: sel.value, op: ZA_FIELDS[sel.value].ops[0], v: "" }; }
+  renderZaControls();
+}
+window.zaFieldChange = zaFieldChange;
+function zaOpChange(sel){
+  _za.filters = zaCollectFilters();
+  var rows = Array.from(document.querySelectorAll(".za-frow"));
+  var idx = rows.indexOf(sel.closest(".za-frow"));
+  if(idx >= 0){
+    if(!_za.filters[idx]) _za.filters[idx] = { f: rows[idx].querySelector(".za-f").value, op: sel.value, v: "" };
+    else _za.filters[idx].op = sel.value;
+  }
+  renderZaControls();
+}
+window.zaOpChange = zaOpChange;
+function zaApplyFilters(){ _za.filters = zaCollectFilters(); renderZaControls(); loadZoneAnalytics(); }
+window.zaApplyFilters = zaApplyFilters;
+async function loadZoneAnalytics(){
+  var box = el("zoneStatsBody");
+  box.innerHTML = "<div class=\"small\" style=\"text-align:center;padding:24px\">加载中...</div>";
+  var rg = ZA_RANGES[_za.range];
+  el("zoneStatsName").textContent = _za.zoneName + " · 过去 " + rg.label;
+  var r = await api("get-zone-analytics", { zoneId: _za.zoneId, rangeSec: rg.sec, filters: _za.filters });
+  if(!r || !r.success){ box.innerHTML = "<div class=\"small\" style=\"color:#ef4444;text-align:center;padding:24px\">获取失败：" + esc((r && r.error) || "该域名可能无分析权限或套餐不支持") + "</div>"; return; }
+  var t = r.result.cur, y = r.result.prev, cs = r.result.countries || [];
+  var tile = "background:rgba(128,128,128,0.07);border:1px solid rgba(128,128,128,0.12);border-radius:12px;padding:14px;text-align:center";
+  var html = "<div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px\">" +
+    "<div style=\"" + tile + "\"><div style=\"font-size:22px;font-weight:700\">" + fmtCount(t.requests) + "</div><div class=\"small\" style=\"margin-top:2px\">请求总数</div></div>" +
+    "<div style=\"" + tile + "\"><div style=\"font-size:22px;font-weight:700\">" + fmtBytes(t.bytes) + "</div><div class=\"small\" style=\"margin-top:2px\">流量带宽</div></div>" +
+    "<div style=\"" + tile + "\"><div style=\"font-size:22px;font-weight:700\">" + fmtCount(t.visits) + "</div><div class=\"small\" style=\"margin-top:2px\">访问总数</div></div>" +
+    "</div>";
+  html += "<div style=\"margin-top:18px;font-weight:700;font-size:14px\">📈 与前 " + rg.label + "对比</div>" +
+    cmpHtml("请求", t.requests, y.requests, fmtCount) + cmpHtml("流量", t.bytes, y.bytes, fmtBytes);
+  html += "<div style=\"margin-top:18px;font-weight:700;font-size:14px\">🗺️ Top 10 访问地区（按请求数）</div>";
+  if(!cs.length){
+    html += "<div class=\"small\" style=\"padding:12px 0\">该时间范围内暂无访问数据</div>";
+  } else {
+    var totalReq = (Number(t.requests) || cs.reduce(function(sm, c){ return sm + c.requests; }, 0)) || 1;
+    var medals = ["🥇", "🥈", "🥉"];
+    html += cs.map(function(c, i){
+      var pct = c.requests / totalReq * 100;
+      var rank = medals[i] || ("<span style=\"display:inline-block;width:24px;text-align:center;font-weight:700;color:#9ca3af\">" + (i + 1) + ".</span>");
+      var barW = Math.max(2, pct);
+      return "<div style=\"padding:10px 0;border-bottom:1px dashed rgba(128,128,128,0.2)\">" +
+        "<div style=\"display:flex;align-items:center;gap:8px\">" +
+        "<span style=\"font-size:18px;width:28px;text-align:center\">" + rank + "</span>" +
+        "<span style=\"font-size:18px\">" + countryFlag(c.code) + "</span>" +
+        "<span style=\"font-weight:600;font-size:14px\">" + esc(COUNTRY_ZH[c.code] || c.code) + " <span style=\"color:#9ca3af;font-weight:400\">(" + esc(c.code) + ")</span></span>" +
+        "<span style=\"margin-left:auto;font-weight:700;font-size:14px\">" + pct.toFixed(1) + "%</span></div>" +
+        "<div style=\"height:8px;background:rgba(128,128,128,0.15);border-radius:99px;margin:8px 0 6px;overflow:hidden\"><div style=\"height:100%;width:" + barW.toFixed(1) + "%;background:linear-gradient(90deg,#f97316,#fb923c);border-radius:99px\"></div></div>" +
+        "<div class=\"small\">📥 " + fmtCount(c.requests) + " 请求 · 📦 " + fmtBytes(c.bytes) + "</div></div>";
+    }).join("");
+  }
+  box.innerHTML = html;
+}
+function openZoneAnalytics(zoneId, zoneName){
+  ensureZoneStatsModal();
+  _za = { zoneId: zoneId, zoneName: zoneName, range: "24h", filters: [] };
+  el("zoneStatsModal").style.display = "flex";
+  renderZaControls();
+  loadZoneAnalytics();
+}
+window.openZoneAnalytics = openZoneAnalytics;
 function closeAddZoneModal(){ el("addZoneModal").style.display = "none"; }
 async function confirmAddZone(){
   var n = el("zoneName").value.trim(); if(!n) return showNotification("请输入域名", "error");
