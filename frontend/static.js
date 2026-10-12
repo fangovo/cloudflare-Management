@@ -793,7 +793,7 @@ async function confirmCreate(){
 async function editWorker(name){
   var r = await api("get-worker-script", { accountId: currentAccountId, scriptName: name });
   if(r && r.rawScript !== undefined){ el("createName").value = name; el("createName").readOnly = true; el("createScript").value = r.rawScript; el("createModal").style.display = "flex"; }
-  else { showNotification("获取脚本失败", "error"); debugOut(r); }
+  else { showNotification("获取脚本失败" + (r && r.error ? "：" + r.error : ""), "error"); debugOut(r); }
 }
 async function deleteWorker(name){
   if(!confirm("确定删除 Worker: " + name + " 吗？")) return;
