@@ -137,14 +137,14 @@ main = "_worker.js"
 compatibility_date = "2026-09-01"
 compatibility_flags = ["nodejs_compat"]
 
-# 可选：批量创建 Worker 的内置模板存储
-# kv_namespaces = [
-#   { binding = "CF_ACCOUNTS_KV", id = "<你的 KV 命名空间 id>" }
-# ]
-
 # 可选：预置 OAuth Client ID（32 位 hex），免去逐浏览器手动填写
 # [vars]
 # OAUTH_CLIENT_ID = "<你的 OAuth 客户端 ID>"
+
+# 可选：批量创建 Worker 的内置模板存储
+# [[kv_namespaces]]
+# binding = "CF_ACCOUNTS_KV"
+# id = "<你的 KV namespace id>"
 ```
 
 **可选：批量部署模板**
