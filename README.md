@@ -76,6 +76,8 @@
 点「使用 Cloudflare 账号登录」，走官方 OAuth 2.0 + PKCE（S256）授权，
 不用创建 / 粘贴 API Token；access token 过期前自动用 refresh token 续期；多账号切换互不干扰。
 
+> 想自己创建并公开一个 OAuth 客户端：见 **[OAuth 客户端配置教程](OAUTH.md)**（从零创建 → 域名验证 → 设为公开 → 接入面板）。
+
 ## 功能截图
 
 ![Workers 管理](screenshots/workers.png)
