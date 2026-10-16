@@ -10,13 +10,13 @@
 Cloudflare 后台左侧 → **管理帐户** → **OAuth 客户端** → 右上角 **创建客户端**。
 按图填写：**客户端名称**（如 cf-manager-v2）、**响应类型**、**授权类型**（Authorization Code）、**令牌身份验证方法**。
 
-![1. 创建 OAuth 客户端](oauth/01.png)
+![1. 创建 OAuth 客户端](oauth/oauth-01.png)
 
 ## 2. 填写回调地址
 
 关键两项：**重定向（回调）URL** 填 `https://你的面板域名/oauth/callback`（如 `https://cf.fang1.kdns.fr/oauth/callback`）；**客户端 URL** 填面板地址。创建后会得到 **Client ID**，先复制保存好。
 
-![2. 填写回调地址](oauth/02.png)
+![2. 填写回调地址](oauth/oauth-02.png)
 
 ## 3. 选择权限范围（关键，别漏）
 
@@ -45,45 +45,45 @@ Cloudflare 后台左侧 → **管理帐户** → **OAuth 客户端** → 右上�
 
 展开 **高级选项** → **徽标**：想把客户端设为 **Public**（所有人可用）必须上传徽标。两种方式：**从 URL 上传** 或 **上传文件**（本地选图）。
 
-![4. 高级选项：上传徽标（想公开必填）](oauth/03.png)
+![4. 高级选项：上传徽标（想公开必填）](oauth/oauth-03.png)
 
 ## 5. DNS 添加 TXT 验证记录
 
 Cloudflare 会给出一条 TXT 记录（名称类似 `cloudflare_oauth_client_publisher=…`）。去你域名的 **DNS** 里添加这条 **TXT** 记录，TTL 选自动，保存。
 
-![5. DNS 添加 TXT 验证记录](oauth/04.png)
+![5. DNS 添加 TXT 验证记录](oauth/oauth-04.png)
 
 ## 6. 触发重新验证
 
 回到 OAuth 客户端列表，如果 **Verification status** 显示 **Failed**（红色），点右侧 **…** → **Restart Verification**，触发重新验证。
 
-![6. 触发重新验证](oauth/05.png)
+![6. 触发重新验证](oauth/oauth-05.png)
 
-![6. 触发重新验证](oauth/06.png)
+![6. 触发重新验证](oauth/oauth-06.png)
 
 ## 7. 等待状态变为 Verified
 
 TXT 生效后状态会变为 **Verified**（绿色）。如果一直不变，检查 TXT 记录的名称和内容是否完全一致、DNS 是否已生效。
 
-![7. 等待状态变为 Verified](oauth/07.png)
+![7. 等待状态变为 Verified](oauth/oauth-07.png)
 
 ## 8. 改为公开（所有人可登录）
 
 点右侧 **…** → **Change Visibility** → 改为 **Public**。公开后任何 Cloudflare 用户都能用这个客户端给你的面板做 OAuth 登录；保持 Private 则只有你自己能用。
 
-![8. 改为公开（所有人可登录）](oauth/08.png)
+![8. 改为公开（所有人可登录）](oauth/oauth-08.png)
 
 ## 9. Worker 添加环境变量
 
 去挂面板域名的 Worker → **Settings → Variables** → **添加环境变量**：名称 `OAUTH_CLIENT_ID`，值填第 2 步复制的 Client ID，环境选 **生产**，保存并部署。
 
-![9. Worker 添加环境变量](oauth/09.png)
+![9. Worker 添加环境变量](oauth/oauth-09.png)
 
 ## 10. 最终效果
 
 用户在面板点“使用 Cloudflare 账号登录”，会跳到 Cloudflare 官方授权页，显示 **cf-manager-v2 wants to access your account**，并有 **已验证域名** 徽标，点 Authorize 即完成登录。
 
-![10. 最终效果](oauth/10.png)
+![10. 最终效果](oauth/oauth-10.png)
 
 ---
 
