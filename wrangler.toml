@@ -7,8 +7,12 @@ compatibility_flags = ["nodejs_compat"]
 # 访问密码（部署前必须设置，逐字填写，不要有多余空格）
 # 推荐用 wrangler secret 命令设置，而不是明文写在这里：
 #   wrangler secret put ACCESS_PASSWORD
+
+# 预置 OAuth Client ID（可选）：让所有浏览器无需手动填写，直接使用「使用 Cloudflare 账号登录」
+# Client ID 是公开标识（32 位 hex），配置教程见 OAUTH.md
+# 未配置时回退到代码内置的默认值
 # [vars]
-# ACCESS_PASSWORD = "你的访问密码"
+# OAUTH_CLIENT_ID = "你的 OAuth 客户端 ID"
 
 # 批量部署模板 KV（可选）：用于「批量创建 Worker」页的内置模板
 # 先创建 KV：wrangler kv namespace create CF_ACCOUNTS_KV
