@@ -1,0 +1,26 @@
+# Cloudflare 管理面板 — Module Worker 配置
+# 部署：wrangler secret put ACCESS_PASSWORD  →  wrangler deploy
+name = "cf-panel"
+main = "cf-panel-worker-v2.9.0.js"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 访问密码必须用 secret 设置，不要明文写在这里：
+#   wrangler secret put ACCESS_PASSWORD
+
+# 可选：预置 OAuth Client ID（32 位 hex，公开标识），配置后所有浏览器无需手动填写
+# 配置教程见 docs/OAUTH.md
+# [vars]
+# OAUTH_CLIENT_ID = "<你的 OAuth 客户端 ID>"
+
+# 可选：批量创建 Worker 的内置模板存储
+#   wrangler kv namespace create CF_ACCOUNTS_KV
+# [[kv_namespaces]]
+# binding = "CF_ACCOUNTS_KV"
+# id = "<namespace id>"
+
+# 可选：会话落库（可精确吊销），不绑也能用
+#   wrangler kv namespace create SESSIONS
+# [[kv_namespaces]]
+# binding = "SESSIONS"
+# id = "<namespace id>"

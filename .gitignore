@@ -1,0 +1,29 @@
+# 依赖
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+
+# wrangler 本地状态
+.wrangler/
+.dev.vars
+
+# 本地备份与历史版本（不发布）
+backup/
+旧版本/
+*.bak
+*.bak-*
+*.zip
+
+# 个人笔记 / 多账号测试数据
+*.txt
+!requirements.txt
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 测试产物
+tests/.worker-under-test.mjs
+coverage/

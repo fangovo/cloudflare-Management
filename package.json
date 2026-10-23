@@ -1,0 +1,33 @@
+{
+  "name": "cf-panel",
+  "version": "2.9.0",
+  "description": "单文件 Cloudflare 管理面板（Module Worker）：Workers / KV / D1 / R2 / Pages / DNS / Tunnel",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "scripts": {
+    "test": "node tests/run.mjs",
+    "check": "node --check cf-panel-worker-v2.9.0.js",
+    "deploy": "wrangler deploy"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "panel",
+    "kv",
+    "d1",
+    "r2",
+    "pages",
+    "dns",
+    "tunnel"
+  ],
+  "files": [
+    "cf-panel-worker-v2.9.0.js",
+    "wrangler.toml",
+    "README.md",
+    "LICENSE"
+  ]
+}
