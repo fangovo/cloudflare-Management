@@ -256,6 +256,12 @@ node tests/run.mjs ../other-worker.js
 - 隧道功能的思路参考 [eooce/Cloudflare-Tunnel-Panel](https://github.com/eooce/Cloudflare-Tunnel-Panel)
 - 批量模板里的第三方脚本分别来自 cmliu/edgetunnel、eooce/Cloudflare-proxy 等仓库，
   **面板只存 URL，部署时才去拉取**；这些脚本各自的许可证与安全性由上游负责。
+  
+---
+
+## 反馈
+
+问题反馈 / 交流群：<https://t.me/yifang_chat>
 
 ---
 
@@ -263,9 +269,5 @@ node tests/run.mjs ../other-worker.js
 
 [MIT](LICENSE)
 
----
 
-## 反馈
-
-问题反馈 / 交流群：<https://t.me/yifang_chat>
 
