@@ -12,6 +12,7 @@
 
 - [它是什么](#它是什么)
 - [功能](#功能)
+- [功能截图](#功能截图)
 - [快速开始](#快速开始)
 - [配置项](#配置项)
 - [需要哪些权限](#需要哪些权限)
@@ -77,6 +78,26 @@
 - Workers 今日请求、按 Worker 排行、24 小时时间序列
 - Token 权限自检（7 项探针，含 DNS 记录级探测）
 - 鉴权三选一：OAuth 2.0 + PKCE（推荐）、API Token、Global API Key
+
+---
+
+## 功能截图
+
+| Workers 管理 | 批量创建 Worker |
+|---|---|
+| ![Workers 管理](screenshots/workers.png) | ![批量创建 Worker](screenshots/batch-create.png) |
+
+| Workers KV | D1 数据库 |
+|---|---|
+| ![Workers KV 管理](screenshots/workers-kv.png) | ![D1 数据库管理](screenshots/d1.png) |
+
+| 域名 / DNS | Pages 管理 |
+|---|---|
+| ![域名管理](screenshots/domains.png) | ![Pages 管理](screenshots/pages.png) |
+
+| Pages 部署记录 | OAuth 账号切换 |
+|---|---|
+| ![Pages 部署记录](screenshots/pages-deployments.png) | ![OAuth 账号切换](screenshots/oauth-accounts.png) |
 
 ---
 
