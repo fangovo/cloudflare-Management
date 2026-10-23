@@ -115,7 +115,7 @@ wrangler deploy
 | 名称 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `ACCESS_PASSWORD` | Secret | 建议 | 面板访问密码。**不设置则 `/api` 完全无鉴权** |
-| `OAUTH_CLIENT_ID` | 变量 | 否 | 预置 OAuth 客户端 ID（32 位 hex），免去每个浏览器手动填。见 [docs/OAUTH.md](docs/OAUTH.md) |
+| `OAUTH_CLIENT_ID` | 变量 | 否 | 预置 OAuth 客户端 ID（32 位 hex），免去每个浏览器手动填。见 [OAuth 客户端配置教程](https://github.com/fangovo/cloudflare-Management/blob/main/OAUTH.md) |
 | `CF_ACCOUNTS_KV` | KV 绑定 | 否 | 「批量创建」页的内置模板存储 |
 | `SESSIONS` | KV 绑定 | 否 | 会话落库，可精确吊销；不绑也能用（无状态签名 + 过期） |
 

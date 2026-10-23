@@ -9,7 +9,7 @@ compatibility_flags = ["nodejs_compat"]
 #   wrangler secret put ACCESS_PASSWORD
 
 # 可选：预置 OAuth Client ID（32 位 hex，公开标识），配置后所有浏览器无需手动填写
-# 配置教程见 docs/OAUTH.md
+# 配置教程：https://github.com/fangovo/cloudflare-Management/blob/main/OAUTH.md
 # [vars]
 # OAUTH_CLIENT_ID = "<你的 OAuth 客户端 ID>"
 
